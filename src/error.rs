@@ -137,7 +137,6 @@ pub enum Error {
     /// was restarted while it served this request. `RemoteFs` returns it. The
     /// request can succeed on a new attempt, so it is a transient error.
     #[error("{context}: the device worker was restarted ({reason})")]
-    #[allow(dead_code)]
     WorkerRestarted { context: String, reason: String },
 
     #[error("WPD is only available on Windows; this build runs on an unsupported platform")]

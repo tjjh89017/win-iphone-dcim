@@ -15,6 +15,7 @@ mod ipc;
 mod model;
 mod paths;
 mod progress;
+mod supervisor;
 mod wpd;
 
 use std::io::{IsTerminal, Write};

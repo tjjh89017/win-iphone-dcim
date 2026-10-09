@@ -3,11 +3,16 @@
 //! WPD implements this trait on Windows. Tests use an in-memory fake. A
 //! future AFC backend can implement it too.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Write;
+use std::time::Duration;
 
 use crate::devpath::DevicePath;
 use crate::error::{Error, Result};
-use crate::model::{Match, Node};
+use crate::ipc::{Target, WireNode};
+use crate::model::{DeviceInfo, Match, Node, ObjectId, join_device_path};
+use crate::supervisor::{Supervisor, WorkerCommand};
 
 pub trait DeviceFs {
     /// The device object. Its children are the top level, for example `Internal Storage`.
@@ -38,18 +43,175 @@ pub fn resolve(fs: &dyn DeviceFs, path: &DevicePath) -> Result<Node> {
             return Err(Error::NotAFolder(current.display_name()));
         }
         let children = fs.list(&current)?;
-        let found = [Match::OriginalFileName, Match::Name]
-            .into_iter()
-            .find_map(|by| children.iter().find(|c| c.matches(component, by)));
-        current = found.cloned().ok_or_else(|| Error::PathNotFound {
-            path: path.to_string(),
-            component: component.clone(),
-        })?;
+        current = find_child(&children, component)
+            .cloned()
+            .ok_or_else(|| Error::PathNotFound {
+                path: path.to_string(),
+                component: component.clone(),
+            })?;
     }
     if path.trailing_slash() && !current.is_folder {
         return Err(Error::NotAFolder(path.to_string()));
     }
     Ok(current)
+}
+
+/// The child that the path component `component` names: a match on the
+/// original file name wins over a match on the object name.
+pub fn find_child<'a>(children: &'a [Node], component: &str) -> Option<&'a Node> {
+    [Match::OriginalFileName, Match::Name]
+        .into_iter()
+        .find_map(|by| children.iter().find(|c| c.matches(component, by)))
+}
+
+/// Open the device. With `isolate` the WPD COM objects live in a worker
+/// process that the supervisor restarts after a hang (`timeout` without
+/// activity) or a crash. Without it they live in this process, which is
+/// for debugging only.
+#[allow(dead_code)] // main.rs uses it after the integration step.
+pub fn open_device_fs(
+    selection: Option<usize>,
+    timeout: Duration,
+    isolate: bool,
+) -> Result<Box<dyn DeviceFs>> {
+    if !isolate {
+        return crate::wpd::open(selection);
+    }
+    let supervisor = Supervisor::start(WorkerCommand::current_exe()?, timeout, selection)?;
+    Ok(Box::new(RemoteFs::new(supervisor)))
+}
+
+/// List the devices, in a short-lived worker process with `isolate`.
+#[allow(dead_code)] // main.rs uses it after the integration step.
+pub fn list_devices(timeout: Duration, isolate: bool) -> Result<Vec<DeviceInfo>> {
+    if !isolate {
+        return crate::wpd::list_devices();
+    }
+    crate::supervisor::list_devices(&WorkerCommand::current_exe()?, timeout)
+}
+
+/// Largest data frame `RemoteFs` asks for. Same as the WPD buffer limit.
+#[allow(dead_code)] // main.rs uses it after the integration step.
+const REMOTE_CHUNK: u32 = crate::wpd::MAX_BUFFER as u32;
+
+/// `DeviceFs` over a worker process.
+///
+/// A node id that this type hands out is `w<generation>:` followed by the
+/// worker's object id. Within the generation that made it, the worker gets
+/// the object id back. After a worker restart the old id is never sent:
+/// the new worker resolves the node by its device path. A path is known
+/// only when its last component names exactly this node; a stale node
+/// without one fails with `PathNotFound`.
+///
+/// A worker hang or crash fails the current call with
+/// `Error::WorkerRestarted`. The next call starts a new worker.
+#[allow(dead_code)] // main.rs uses it after the integration step.
+pub struct RemoteFs {
+    supervisor: RefCell<Supervisor>,
+    /// Device path of each node this value handed out, by node id.
+    paths: RefCell<HashMap<ObjectId, String>>,
+}
+
+#[allow(dead_code)] // main.rs uses it after the integration step.
+impl RemoteFs {
+    pub fn new(supervisor: Supervisor) -> Self {
+        Self {
+            supervisor: RefCell::new(supervisor),
+            paths: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The supervisor, for tests that drive it directly.
+    #[cfg(test)]
+    pub fn supervisor(&self) -> std::cell::RefMut<'_, Supervisor> {
+        self.supervisor.borrow_mut()
+    }
+
+    fn encode(generation: u64, raw: &[u16]) -> ObjectId {
+        let mut units: Vec<u16> = format!("w{generation}:").encode_utf16().collect();
+        units.extend_from_slice(raw);
+        ObjectId(units)
+    }
+
+    fn decode(id: &ObjectId) -> Option<(u64, &[u16])> {
+        let colon = id.0.iter().position(|&u| u == u16::from(b':'))?;
+        let tag = String::from_utf16(&id.0[..colon]).ok()?;
+        let generation = tag.strip_prefix('w')?.parse().ok()?;
+        Some((generation, &id.0[colon + 1..]))
+    }
+
+    fn node(&self, generation: u64, wire: WireNode, path: Option<String>) -> Node {
+        let mut node = Node::from(wire);
+        node.id = Self::encode(generation, &node.id.0);
+        if let Some(path) = path {
+            self.paths.borrow_mut().insert(node.id.clone(), path);
+        }
+        node
+    }
+
+    /// How to name `node` to the worker of `generation`.
+    fn target(&self, node: &Node, generation: u64) -> Result<Target> {
+        let path = self.paths.borrow().get(&node.id).cloned();
+        let current = Self::decode(&node.id)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, raw)| raw.to_vec());
+        match (path, current) {
+            (Some(path), id) => Ok(Target { path, id }),
+            (None, Some(id)) => Ok(Target {
+                path: node.display_name(),
+                id: Some(id),
+            }),
+            (None, None) => Err(Error::PathNotFound {
+                path: node.display_name(),
+                component: node.display_name(),
+            }),
+        }
+    }
+}
+
+impl DeviceFs for RemoteFs {
+    fn root(&self) -> Node {
+        let supervisor = self.supervisor.borrow();
+        self.node(
+            supervisor.generation(),
+            supervisor.root().clone(),
+            Some("/".into()),
+        )
+    }
+
+    fn list(&self, dir: &Node) -> Result<Vec<Node>> {
+        let mut supervisor = self.supervisor.borrow_mut();
+        let generation = supervisor.ensure()?;
+        let target = self.target(dir, generation)?;
+        let parent = target.path.clone();
+        let wire = supervisor.list(target)?;
+        let plain: Vec<Node> = wire.iter().cloned().map(Node::from).collect();
+        Ok(wire
+            .into_iter()
+            .zip(&plain)
+            .map(|(w, n)| {
+                let path = n
+                    .original_file_name
+                    .as_deref()
+                    .or(n.name.as_deref())
+                    .filter(|c| !c.is_empty() && !c.contains('/'))
+                    .filter(|c| find_child(&plain, c).is_some_and(|found| found.id == n.id))
+                    .map(|c| join_device_path(&parent, c));
+                self.node(generation, w, path)
+            })
+            .collect())
+    }
+
+    fn device_id(&self) -> Option<String> {
+        self.supervisor.borrow().device_id()
+    }
+
+    fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64> {
+        let mut supervisor = self.supervisor.borrow_mut();
+        let generation = supervisor.ensure()?;
+        let target = self.target(file, generation)?;
+        supervisor.read(target, REMOTE_CHUNK, out)
+    }
 }
 
 #[cfg(test)]
