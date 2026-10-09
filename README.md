@@ -7,8 +7,8 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 
 ## Status
 
-Phase 1 (full backup MVP) is complete. Phase 2 (incremental copy and
-reliability) is in progress. See [SPEC.md](SPEC.md) for the full plan.
+Phase 1 and 2 complete, GUI not started. See [SPEC.md](SPEC.md) for the
+full plan.
 
 Works now:
 
@@ -24,11 +24,18 @@ Works now:
 - Retries with backoff for transient errors (`--retries`).
 - `--verify local-hash`: a BLAKE3 hash of each new copy.
 - `verify`: check DEST against the manifest.
+- Worker process isolation with a watchdog (`--timeout`), so a blocked WPD
+  call cannot hang the tool. See [Worker process](#worker-process).
 
 Planned:
 
-- Worker process isolation, so a blocked WPD call cannot hang the tool.
 - A GUI (Phase 4, optional).
+
+### Verification scope
+
+No real-device test has run yet. All automated tests use the in-memory fake
+device, on Linux and on `windows-latest`. Use the
+[checklist](#testing-on-a-real-iphone) below for the first real-device run.
 
 ## Download
 
@@ -38,14 +45,19 @@ and select a green run. Every run on `main` uploads two artifacts:
 - `win-iphone-dcim-windows-x64`
 - `win-iphone-dcim-windows-arm64`
 
-You must log in to GitHub to download artifacts. The ARM64 binary is built but
-not tested on hardware.
+You must log in to GitHub to download artifacts. Artifacts expire after 7
+days. The ARM64 binary is built but not tested on hardware.
 
 With the GitHub CLI:
 
 ```sh
 gh run download <run-id> -n win-iphone-dcim-windows-x64
 ```
+
+A pushed `v*` tag builds a draft GitHub release with
+`win-iphone-dcim-windows-x64.exe`, `win-iphone-dcim-windows-arm64.exe`, a
+`SHA256SUMS-<name>.txt` file per binary, and one `SHA256SUMS.txt` for both.
+No release is published yet.
 
 ## Requirements
 
@@ -77,6 +89,11 @@ Global flags:
   transient error. The default is 3. See [Retries](#retries).
 - `--diagnostic` also logs the raw device ID. Without it, logs show only the
   first 8 hex characters of its BLAKE3 hash.
+- `--timeout <DURATION>` sets the worker watchdog. The default is `120s`. The
+  value is whole seconds (`90`) or a number with the unit `s`, `m` or `h`
+  (`90s`, `2m`). See [Worker process](#worker-process).
+- `--no-isolate` runs the WPD calls in the main process instead of a worker
+  process. A hung WPD call then hangs the tool. Use it only for debugging.
 
 Commands:
 
@@ -224,7 +241,16 @@ collisions, a full disk and access denied fail at once.
 - If the device is still unavailable after the last retry, `cp` prints the
   summary and stops with exit code 3.
 
-## verify
+## Worker process
+
+`ls`, `tree`, `cp` and `devices` run every WPD call in a child process: the
+same executable, started with a hidden `worker` subcommand. If a device call
+shows no activity for `--timeout`, or the worker crashes, the main process
+kills the worker, fails the current file with "the device worker was
+restarted", and starts a new worker for the next call; `cp` retries the file
+like any other transient error. COM objects never leave the worker, and the
+new worker finds files again by their device path.
+
 
 ```powershell
 win-iphone-dcim.exe verify D:\iPhoneBackup
@@ -245,6 +271,27 @@ It prints one line per file (`[ok]`, `[missing]`, `[size-mismatch]`,
 ```
 
 The exit code is 0 if all files are ok, 1 otherwise.
+
+## Testing on a real iPhone
+
+No real-device test has run yet. Run this checklist on Windows with an
+iPhone attached, unlocked and trusted. Use a new empty folder for DEST, for
+example `D:\iPhoneTest`.
+
+1. `devices` lists the iPhone.
+2. `ls -l /` shows `Internal Storage`.
+3. `tree "/Internal Storage/DCIM"` shows the same folders as File Explorer.
+4. `cp` of one HEIC file to DEST: the copy opens and has the device size.
+5. `cp -r` of one DCIM folder to DEST: all files are copied.
+6. Run the same `cp -r` again: every file is `[skip] ... verified`.
+7. `verify DEST` reports `missing=0 size-mismatch=0`.
+8. Lock the iPhone and run `devices` and `ls /`: a clear error, no hang.
+9. Unplug the cable during a `cp -r` of a folder with large MOV files: watch
+   for `[retry k/N]` lines, plug the cable back in and unlock the phone. No
+   `.part` file is left as a complete file. A second run copies the rest.
+
+Record the iPhone model, the iOS version and the Windows version with the
+results.
 
 ## Exit codes
 
@@ -273,7 +320,7 @@ Do not run cargo on the host for this repo. Use the Docker wrapper
 ```sh
 scripts/dev.sh                     # x64 release build
 scripts/dev.sh xwin build --release --target aarch64-pc-windows-msvc   # ARM64 release build
-scripts/dev.sh test                # portable unit tests (Linux container)
+scripts/dev.sh test                # unit and end-to-end tests (Linux container)
 scripts/dev.sh xwin check --target x86_64-pc-windows-msvc
 scripts/dev.sh xwin clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
@@ -291,7 +338,9 @@ on Windows with an iPhone attached.
 - All WPD code is in `src/wpd/` under `#[cfg(windows)]`. On other platforms,
   WPD calls return an "unsupported platform" error.
 - The commands use the `DeviceFs` trait. Unit tests use the in-memory fake in
-  `device_fs::fake`, so CI does not need an iPhone.
+  `device_fs::fake`, so CI does not need an iPhone. `tests/e2e.rs` runs the
+  built executable with `WIN_IPHONE_DCIM_FAKE_FS=1`, so the worker serves the
+  fake device. That variable is for tests only.
 
 ## License
 

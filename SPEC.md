@@ -135,7 +135,8 @@ win-iphone-dcim/
 │   │   ├── ls.rs              # ls command
 │   │   ├── tree.rs            # tree command
 │   │   ├── cp.rs              # cp command, incremental rules, retries
-│   │   └── verify.rs          # verify command
+│   │   ├── verify.rs          # verify command
+│   │   └── worker.rs          # hidden worker subcommand; owns the WPD COM objects
 │   ├── wpd/
 │   │   ├── mod.rs
 │   │   ├── com.rs             # COM apartment lifecycle; no cross-thread COM handles
@@ -149,14 +150,11 @@ win-iphone-dcim/
 │   │   ├── transfer.rs        # .part copy + validation + atomic rename
 │   │   ├── manifest.rs        # JSONL load/append/reconcile
 │   │   └── paths.rs           # Windows filename validation, case collisions
-│   ├── supervisor.rs          # planned; parent process and worker lifecycle
-│   ├── ipc.rs                 # planned; JSONL process messages
+│   ├── supervisor.rs          # parent side: worker lifecycle, watchdog, restart
+│   ├── ipc.rs                 # JSONL control messages and the data pipe
 │   └── gui/                   # planned; Phase 4 only; see section 10
-└── tests/                     # planned
-    ├── fixtures/
-    ├── path_safety.rs
-    ├── manifest_recovery.rs
-    └── planner.rs
+└── tests/
+    └── e2e.rs                 # runs the built executable against the fake device
 ```
 
 You can start with a single binary. Start the worker with the hidden `worker` subcommand. The parent and the worker exchange commands and results as JSONL through stdin/stdout. Use stderr only for logs. This rule keeps noise out of the protocol output.
@@ -234,7 +232,8 @@ win-iphone-dcim.exe verify [--hash] DEST
 | --- | --- | --- |
 | `-d`, `--device <id>` | Automatic if only one device is connected | Use the stable selection key that `devices` lists, if possible. Use an index only for interactive use |
 | `--retries <n>` | 3 | Maximum number of retries for each file. This number counts the additional attempts after a failure |
-| `--timeout <duration>` | 120s | Watchdog for a worker that does not respond. The tool cannot cancel all COM calls |
+| `--timeout <duration>` | 120s | Watchdog for a worker that does not respond. The tool cannot cancel all COM calls. Whole seconds (`90`) or a number with the unit `s`, `m` or `h` (`90s`, `2m`) |
+| `--no-isolate` | false | Run the WPD calls in the main process, not in a worker. A hung call then hangs the tool. Debugging only |
 | `--log-format` | text | `text` / `json` |
 | `--diagnostic` | false | Also log the raw device ID. Without it, logs show the first 8 hex characters of its BLAKE3 hash |
 
@@ -381,16 +380,18 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 ### Phase 2 — Incremental and reliability
 
 - [x] Implement the JSONL manifest, skip, conflict, and retry.
-- [ ] Implement child process isolation, the watchdog, and worker crash recovery.
-- [ ] Rebuild the enumeration after a USB unplug/replug. Do not overwrite existing data.
+- [x] Implement child process isolation, the watchdog, and worker crash recovery.
+- [x] Rebuild the enumeration after a USB unplug/replug. Do not overwrite existing data. `RemoteFs` resolves nodes by device path in the new worker. A real unplug test is still manual.
 - [ ] Run long tests on a real device with 10,000+ files and many large MOV files.
 
 ### Phase 3 — Release
 
-- [ ] Run fmt/clippy/test/build on GitHub Actions `windows-latest`.
-- [ ] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation.
+- [x] Run fmt/clippy/test/build on GitHub Actions `windows-latest`.
+- [x] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation.
 - [ ] Test on a minimum of two iPhone/iOS combinations. If only one combination is available, state the verification scope clearly.
-- [ ] Add mock backend / fixture tests for use without an iPhone. CI must not depend on hardware.
+- [x] Add mock backend / fixture tests for use without an iPhone. CI must not depend on hardware.
+
+Verification scope as of 2026-10-09: no real-device test has run yet. All tests use the in-memory fake device.
 
 ### Phase 4 — GUI (last phase, optional)
 
@@ -428,7 +429,7 @@ Known limits:
 | A single file larger than 4 GiB | The tool uses `u64` sizes and streams the data. No integer overflow occurs |
 | Not sufficient local disk space | The tool shows a clear error and keeps existing files |
 | iPhone locked / not trusted | The tool shows a clear error. The tool does not retry without limit |
-| WPD `Read()` hangs | The parent detects the hang and cleans up the worker |
+| WPD `Read()` hangs | The parent detects the hang and cleans up the worker. `cp` retries the file in a new worker (automated in `tests/e2e.rs` with the fake device) |
 | A file of a different size is at the target path | The tool warns and skips. With `-f` it replaces the file through a `.part` file. It never overwrites in place |
 | Case collision or illegal file name | The tool shows a clear error. The tool does not rename the file silently |
 | No file size metadata | The tool correctly marks the status as unverified |
