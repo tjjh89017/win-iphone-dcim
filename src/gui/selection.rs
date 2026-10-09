@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
+use super::filedesc::{self, FileItem};
 use crate::cmd::sort::{SortKey, desc_none_last, name_order};
 use crate::device_fs::DeviceFs;
 use crate::error::Result;
@@ -137,6 +138,39 @@ impl Tree {
             }
         }
         Some((files, bytes))
+    }
+
+    /// Every object at and below `paths` for an Explorer paste, in the
+    /// order of the device thread's walk: each folder before its contents.
+    /// Relative paths start at the common parent of `paths`. `None` if a
+    /// path or a folder below it is not loaded.
+    pub fn files_under(&self, paths: &[String]) -> Option<Vec<FileItem>> {
+        let base = filedesc::common_parent(paths);
+        let mut items = Vec::new();
+        for path in paths {
+            let rel = filedesc::relative(&base, path)?;
+            let mut stack = vec![(path.as_str(), rel)];
+            while let Some((p, rel)) = stack.pop() {
+                let item = self.items.get(p)?;
+                let e = &item.entry;
+                items.push(FileItem {
+                    path: e.path.clone(),
+                    rel: rel.clone(),
+                    is_folder: e.is_folder,
+                    size: e.size,
+                    modified: e.modified,
+                    created: e.created,
+                });
+                if e.is_folder {
+                    // Reversed, so the stack pops them in listing order.
+                    for child in item.children.as_ref()?.iter().rev() {
+                        let name = &self.items.get(child)?.entry.name;
+                        stack.push((child.as_str(), format!("{rel}\\{name}")));
+                    }
+                }
+            }
+        }
+        Some(items)
     }
 
     /// Set the listing of a folder. A new child takes the mark of the
@@ -683,6 +717,58 @@ mod tests {
         assert_eq!(tree.totals(&[A.into(), B1.into()]), Some((3, 2060)));
         assert_eq!(tree.totals(&["/".into()]), Some((3, 2060)));
         assert_eq!(tree.totals(&[]), Some((0, 0)));
+    }
+
+    #[test]
+    fn files_under_lists_folders_before_their_contents() {
+        let tree = loaded(&dcim());
+        let items = tree.files_under(&[A.into(), B1.into()]).unwrap();
+        let got: Vec<(&str, &str, bool)> = items
+            .iter()
+            .map(|i| (i.path.as_str(), i.rel.as_str(), i.is_folder))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (A, "202601_a", true),
+                (A1, "202601_a\\IMG_0001.HEIC", false),
+                (A2, "202601_a\\IMG_0002.MOV", false),
+                (B1, "202601_b\\IMG_0001.HEIC", false),
+            ]
+        );
+        let a2 = items.iter().find(|i| i.path == A2).unwrap();
+        assert_eq!(a2.size, Some(2048));
+        assert_eq!(a2.modified, tree.entry(A2).unwrap().modified);
+        assert_eq!(a2.created, tree.entry(A2).unwrap().created);
+    }
+
+    #[test]
+    fn files_under_one_file_is_its_name() {
+        let tree = loaded(&dcim());
+        let items = tree.files_under(&[A2.into()]).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].rel, "IMG_0002.MOV");
+        assert_eq!(tree.files_under(&[]), Some(vec![]));
+    }
+
+    #[test]
+    fn files_under_is_unknown_with_an_unloaded_folder() {
+        let mut tree = loaded(&dcim());
+        let mut b = tree.entry(B).unwrap().clone();
+        b.name = "202601_c".into();
+        b.path = format!("{DCIM}/202601_c");
+        let mut kids: Vec<Entry> = tree
+            .children(DCIM)
+            .unwrap()
+            .iter()
+            .map(|p| tree.entry(p).unwrap().clone())
+            .collect();
+        kids.push(b.clone());
+        tree.set_children(DCIM, kids);
+        assert!(tree.files_under(&[A.into()]).is_some());
+        assert_eq!(tree.files_under(&[b.path.clone()]), None);
+        assert_eq!(tree.files_under(&[DCIM.into()]), None);
+        assert_eq!(tree.files_under(&["/missing".into()]), None);
     }
 
     #[test]

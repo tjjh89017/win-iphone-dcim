@@ -171,6 +171,10 @@ pub enum Reply {
     },
     /// A line for the log about an Explorer paste.
     PasteNote(String),
+    /// The walk of an `Enumerate` request has found `files` files so far.
+    EnumerateProgress {
+        files: usize,
+    },
     /// Explorer reads file `number` of `files`.
     PasteProgress {
         number: usize,
@@ -370,13 +374,33 @@ impl DeviceThread {
         let base = filedesc::common_parent(paths);
         let mut items = Vec::new();
         let mut found = Vec::new();
+        let out = &self.out;
+        let mut files = 0;
+        let mut last = Instant::now();
+        let mut progress = |item: &FileItem| {
+            if !item.is_folder {
+                files += 1;
+            }
+            if last.elapsed() >= PROGRESS_INTERVAL {
+                last = Instant::now();
+                out.send(Reply::EnumerateProgress { files });
+            }
+        };
         for path in paths {
             let node = self.node(path)?;
             let rel = filedesc::relative(&base, path).ok_or_else(|| Error::PathNotFound {
                 path: path.clone(),
                 component: path.clone(),
             })?;
-            walk(self.fs()?, &node, path.clone(), rel, &mut items, &mut found)?;
+            walk(
+                self.fs()?,
+                &node,
+                path.clone(),
+                rel,
+                &mut items,
+                &mut found,
+                &mut progress,
+            )?;
         }
         // The streams resolve these paths again; keep the nodes.
         for (path, node) in found {
@@ -593,15 +617,18 @@ fn walk(
     rel: String,
     items: &mut Vec<FileItem>,
     found: &mut Vec<(String, Node)>,
+    progress: &mut dyn FnMut(&FileItem),
 ) -> Result<()> {
-    items.push(FileItem {
+    let item = FileItem {
         path: path.clone(),
         rel: rel.clone(),
         is_folder: node.is_folder,
         size: node.size,
         modified: node.modified,
         created: node.created,
-    });
+    };
+    progress(&item);
+    items.push(item);
     if node.is_folder {
         for child in fs.list(node)? {
             let name = child.display_name();
@@ -613,6 +640,7 @@ fn walk(
                 format!("{rel}\\{name}"),
                 items,
                 found,
+                progress,
             )?;
             found.push((child_path, child));
         }

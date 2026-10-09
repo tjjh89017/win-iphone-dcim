@@ -19,6 +19,7 @@ use super::copyview::CopyTracker;
 use super::dataobject::{self, DataObject, PasteShared};
 use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
 use super::dnd;
+use super::filedesc::{self, Listing};
 use super::nav::{NavHistory, breadcrumbs};
 use super::selection::{Check, Entry, ListSelection, Tree, band_rows, sort_rows};
 use super::shell;
@@ -471,6 +472,12 @@ impl App {
                 Err(e) => self.error(format!("Cannot open {}: {e}", local.display())),
             },
             Reply::PasteNote(text) => self.push_log(text),
+            Reply::EnumerateProgress { files } => {
+                // A drag also walks; only a waiting clipboard copy shows it.
+                if self.clip_wait.is_some() {
+                    self.status = format!("Preparing {files} files for Explorer...");
+                }
+            }
             Reply::PasteProgress {
                 number,
                 files,
@@ -540,8 +547,23 @@ impl App {
             );
             return;
         }
-        tracing::info!("Explorer copy: listing {} path(s)", paths.len());
         let slot = Arc::new(Pending::default());
+        // The tree may hold every object already; then no walk is needed.
+        if let Some(items) = self.tree.as_ref().and_then(|t| t.files_under(&paths)) {
+            tracing::info!(
+                "Explorer copy: {} path(s) listed from the tree",
+                paths.len()
+            );
+            let listing = Listing::new(&items, filedesc::device_filetime);
+            for skip in &listing.skipped {
+                tracing::warn!("paste: {skip}");
+                self.push_log(format!("[skip] {skip}"));
+            }
+            slot.set(Ok(Arc::new(listing)));
+            self.clip_wait = Some(slot);
+            return self.finish_explorer_copy();
+        }
+        tracing::info!("Explorer copy: listing {} path(s)", paths.len());
         self.status = format!("Preparing {} item(s) for File Explorer...", paths.len());
         self.send(Request::Enumerate {
             paths,
@@ -1202,7 +1224,9 @@ impl App {
                 self.paste.is_some(),
                 Button::new(EXPLORER_COPY).shortcut_text("Ctrl+C"),
             )
-            .on_hover_text("Then paste in File Explorer. Explorer shows its own progress")
+            .on_hover_text(
+                "Explorer paste shows no speed and cannot resume. Use Copy to folder for that.",
+            )
             .clicked()
         {
             actions.push(Action::ExplorerCopy(targets.to_vec()));

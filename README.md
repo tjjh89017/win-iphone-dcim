@@ -305,8 +305,11 @@ for the file type.
 "Copy (paste in Explorer)" in a right-click menu, or Ctrl+C in the file
 list, puts the selected items on the clipboard. With no selected row, Ctrl+C
 takes the checked items. With neither, the status text shows "Select or
-check items to copy". Folders include everything below them. The status text shows "N items copied. Paste in File Explorer."
-when the folders are listed. Then paste in any File Explorer folder.
+check items to copy". Folders include everything below them. When the
+tree already holds every folder below the items, the copy is ready at once.
+Otherwise the status text shows "Preparing N files for Explorer..." while
+the device thread lists the folders. Then it shows "N items copied. Paste
+in File Explorer." Then paste in any File Explorer folder.
 
 You can also drag selected rows from the file list and drop them on a File
 Explorer window or the desktop. Only copy is offered; Explorer never moves
@@ -322,6 +325,8 @@ Limits of this mode:
   the paste completes. If you close it during a paste, the GUI asks first
   ("Close anyway"); Explorer then reports an error for the remaining files.
 - The speed is the same as the CLI and the in-app copy, not faster.
+- Explorer paste shows no speed meter in the app and has no resume. "Copy to
+  folder" shows the speed and skips files that are already copied.
 - Explorer decides replace or skip. There is no manifest, no verification
   and no incremental skip of verified files. Use "Copy to folder" or
   "Copy to..." for those.

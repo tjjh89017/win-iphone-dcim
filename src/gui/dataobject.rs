@@ -86,7 +86,7 @@ fn format_name(cf: u16) -> String {
 }
 
 fn log_request(call: &str, fmt: &FORMATETC, result: HRESULT) {
-    tracing::debug!(
+    tracing::info!(
         "paste: {call} {} aspect={} lindex={} tymed={:#x} -> {:#010x}",
         format_name(fmt.cfFormat),
         fmt.dwAspect,
@@ -275,7 +275,11 @@ impl IDataObject_Impl for DataObject_Impl {
         result
     }
 
-    fn GetDataHere(&self, _pformatetc: *const FORMATETC, _pmedium: *mut STGMEDIUM) -> Result<()> {
+    fn GetDataHere(&self, pformatetc: *const FORMATETC, _pmedium: *mut STGMEDIUM) -> Result<()> {
+        // SAFETY: COM passes a valid pointer or null.
+        if let Some(fmt) = unsafe { pformatetc.as_ref() } {
+            log_request("GetDataHere", fmt, E_NOTIMPL);
+        }
         Err(E_NOTIMPL.into())
     }
 
@@ -303,6 +307,10 @@ impl IDataObject_Impl for DataObject_Impl {
         }) else {
             return E_POINTER;
         };
+        tracing::info!(
+            "paste: GetCanonicalFormatEtc {}",
+            format_name(input.cfFormat)
+        );
         *out = *input;
         out.ptd = std::ptr::null_mut();
         DATA_S_SAMEFORMATETC
@@ -316,6 +324,7 @@ impl IDataObject_Impl for DataObject_Impl {
     ) -> Result<()> {
         // SAFETY: COM passes a valid pointer or null.
         let fmt = unsafe { pformatetc.as_ref() }.ok_or(E_POINTER)?;
+        tracing::info!("paste: SetData {}", format_name(fmt.cfFormat));
         // Explorer reports the performed effect here. It is always a copy.
         if fmt.cfFormat != formats().performed {
             return Err(E_NOTIMPL.into());
@@ -328,7 +337,7 @@ impl IDataObject_Impl for DataObject_Impl {
     }
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> Result<IEnumFORMATETC> {
-        tracing::debug!("paste: EnumFormatEtc direction={dwdirection}");
+        tracing::info!("paste: EnumFormatEtc direction={dwdirection}");
         if dwdirection != DATADIR_GET.0 as u32 {
             return Err(E_NOTIMPL.into());
         }
@@ -348,14 +357,17 @@ impl IDataObject_Impl for DataObject_Impl {
         _advf: u32,
         _padvsink: Ref<IAdviseSink>,
     ) -> Result<u32> {
+        tracing::info!("paste: DAdvise");
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 
     fn DUnadvise(&self, _dwconnection: u32) -> Result<()> {
+        tracing::info!("paste: DUnadvise");
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 
     fn EnumDAdvise(&self) -> Result<IEnumSTATDATA> {
+        tracing::info!("paste: EnumDAdvise");
         Err(OLE_E_ADVISENOTSUPPORTED.into())
     }
 }
@@ -364,16 +376,19 @@ impl IDataObject_Impl for DataObject_Impl {
 /// drag loop of the UI thread until the copy ends.
 impl IDataObjectAsyncCapability_Impl for DataObject_Impl {
     fn SetAsyncMode(&self, fdoopasync: BOOL) -> Result<()> {
+        tracing::info!("paste: SetAsyncMode {}", fdoopasync.as_bool());
         self.async_mode
             .store(fdoopasync.as_bool(), Ordering::SeqCst);
         Ok(())
     }
 
     fn GetAsyncMode(&self) -> Result<BOOL> {
+        tracing::info!("paste: GetAsyncMode");
         Ok(self.async_mode.load(Ordering::SeqCst).into())
     }
 
     fn StartOperation(&self, _pbcreserved: Ref<IBindCtx>) -> Result<()> {
+        tracing::info!("paste: StartOperation");
         if !self.in_operation.swap(true, Ordering::SeqCst) {
             self.shared.operations.fetch_add(1, Ordering::SeqCst);
         }
@@ -381,15 +396,20 @@ impl IDataObjectAsyncCapability_Impl for DataObject_Impl {
     }
 
     fn InOperation(&self) -> Result<BOOL> {
+        tracing::info!("paste: InOperation");
         Ok(self.in_operation.load(Ordering::SeqCst).into())
     }
 
     fn EndOperation(
         &self,
-        _hresult: HRESULT,
+        hresult: HRESULT,
         _pbcreserved: Ref<IBindCtx>,
-        _dweffects: u32,
+        dweffects: u32,
     ) -> Result<()> {
+        tracing::info!(
+            "paste: EndOperation hr={:#010x} effects={dweffects}",
+            hresult.0
+        );
         if self.in_operation.swap(false, Ordering::SeqCst) {
             self.shared.operations.fetch_sub(1, Ordering::SeqCst);
         }
