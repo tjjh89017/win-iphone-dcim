@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use super::report;
+use super::sort::{SortKey, folders_first, sort_entries};
 use crate::device_fs::{DeviceFs, resolve};
 use crate::devpath::DevicePath;
 use crate::error::{Result, stdout_err};
@@ -21,6 +22,7 @@ pub fn run(
     path: &DevicePath,
     max_depth: Option<usize>,
     json: bool,
+    dirs_first: bool,
     out: &mut dyn Write,
 ) -> Result<usize> {
     let root = resolve(fs, path)?;
@@ -30,6 +32,7 @@ pub fn run(
         fs,
         max_depth,
         json,
+        dirs_first,
         out,
         counts: &mut counts,
     };
@@ -72,6 +75,7 @@ struct Walker<'a> {
     fs: &'a dyn DeviceFs,
     max_depth: Option<usize>,
     json: bool,
+    dirs_first: bool,
     out: &'a mut dyn Write,
     counts: &'a mut Counts,
 }
@@ -95,7 +99,7 @@ impl Walker<'_> {
         if self.max_depth.is_some_and(|m| depth > m) {
             return Ok(());
         }
-        let children = match self.fs.list(dir) {
+        let mut children = match self.fs.list(dir) {
             Ok(c) => c,
             Err(e) => {
                 report(e)?;
@@ -103,6 +107,10 @@ impl Walker<'_> {
                 return Ok(());
             }
         };
+        sort_entries(&mut children, SortKey::Name, false);
+        if self.dirs_first {
+            folders_first(&mut children);
+        }
         let last_index = children.len().saturating_sub(1);
         for (i, child) in children.iter().enumerate() {
             let name = child.display_name();
@@ -135,13 +143,23 @@ mod tests {
     use crate::device_fs::fake::dcim;
 
     fn tree(path: &str, max_depth: Option<usize>, json: bool) -> String {
-        let fs = dcim();
+        tree_with(&dcim(), path, max_depth, json, false)
+    }
+
+    fn tree_with(
+        fs: &crate::device_fs::fake::FakeFs,
+        path: &str,
+        max_depth: Option<usize>,
+        json: bool,
+        dirs_first: bool,
+    ) -> String {
         let mut out = Vec::new();
         run(
-            &fs,
+            fs,
             &DevicePath::parse(path).unwrap(),
             max_depth,
             json,
+            dirs_first,
             &mut out,
         )
         .unwrap();
@@ -163,6 +181,45 @@ mod tests {
 4 directories, 3 files
 ";
         assert_eq!(tree("/", None, false), expected);
+    }
+
+    fn mixed() -> crate::device_fs::fake::FakeFs {
+        let mut fs = crate::device_fs::fake::FakeFs::new();
+        fs.file(0, "b.txt", b"1");
+        fs.folder(0, "Zdir");
+        fs.file(0, "A.txt", b"1");
+        fs.folder(0, "adir");
+        fs
+    }
+
+    #[test]
+    fn sorts_by_name_mixed() {
+        let out = tree_with(&mixed(), "/", None, false, false);
+        let names: Vec<&str> = out.lines().skip(1).take(4).collect();
+        assert_eq!(
+            names,
+            [
+                "├── A.txt  (1 B)",
+                "├── adir",
+                "├── b.txt  (1 B)",
+                "└── Zdir"
+            ]
+        );
+    }
+
+    #[test]
+    fn dirs_first_lists_folders_before_files() {
+        let out = tree_with(&mixed(), "/", None, false, true);
+        let names: Vec<&str> = out.lines().skip(1).take(4).collect();
+        assert_eq!(
+            names,
+            [
+                "├── adir",
+                "├── Zdir",
+                "├── A.txt  (1 B)",
+                "└── b.txt  (1 B)"
+            ]
+        );
     }
 
     #[test]

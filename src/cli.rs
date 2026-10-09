@@ -56,6 +56,22 @@ pub enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Sort by size, largest first. Entries without a size go last.
+        #[arg(short = 'S', conflicts_with_all = ["sort_time", "unsorted"])]
+        sort_size: bool,
+
+        /// Sort by modification time, newest first. Entries without a time go last.
+        #[arg(short = 't', conflicts_with = "unsorted")]
+        sort_time: bool,
+
+        /// Reverse the sort order.
+        #[arg(short = 'r', conflicts_with = "unsorted")]
+        reverse: bool,
+
+        /// Do not sort. Keep the device order.
+        #[arg(short = 'U')]
+        unsorted: bool,
+
         /// Device paths. Default: `/`.
         #[arg(value_name = "PATH")]
         paths: Vec<DevicePath>,
@@ -70,6 +86,10 @@ pub enum Command {
         /// Print one JSON object per line (JSONL).
         #[arg(long)]
         json: bool,
+
+        /// List folders before files. Each group stays sorted by name.
+        #[arg(long)]
+        dirs_first: bool,
 
         /// Device path. Default: `/`.
         #[arg(value_name = "PATH")]
@@ -140,6 +160,7 @@ mod tests {
             recursive,
             json,
             paths,
+            ..
         } = cli.command
         else {
             panic!("not ls");
@@ -148,6 +169,18 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].components(), ["Internal Storage", "DCIM"]);
         assert!(paths[1].is_root());
+    }
+
+    #[test]
+    fn ls_sort_flags_conflict() {
+        assert!(parse(&["ls", "-S", "-t"]).is_err());
+        assert!(parse(&["ls", "-U", "-S"]).is_err());
+        assert!(parse(&["ls", "-U", "-t"]).is_err());
+        assert!(parse(&["ls", "-U", "-r"]).is_err());
+        assert!(parse(&["ls", "-St"]).is_err());
+        assert!(parse(&["ls", "-Sr"]).is_ok());
+        assert!(parse(&["ls", "-tr"]).is_ok());
+        assert!(parse(&["tree", "--dirs-first"]).is_ok());
     }
 
     #[test]
@@ -174,7 +207,10 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.log_format, LogFormat::Json);
-        let Command::Tree { level, json, path } = cli.command else {
+        let Command::Tree {
+            level, json, path, ..
+        } = cli.command
+        else {
             panic!("not tree");
         };
         assert_eq!(level, Some(2));

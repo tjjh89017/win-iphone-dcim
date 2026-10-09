@@ -21,7 +21,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command, LogFormat};
-use crate::cmd::{cp::CpOptions, ls::LsOptions};
+use crate::cmd::{cp::CpOptions, ls::LsOptions, sort::SortKey};
 use crate::devpath::DevicePath;
 use crate::error::{Error, exit};
 
@@ -72,6 +72,10 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             long,
             recursive,
             json,
+            sort_size,
+            sort_time,
+            reverse,
+            unsorted,
             paths,
         } => {
             let fs = wpd::open(cli.device)?;
@@ -79,13 +83,28 @@ fn run(cli: &Cli) -> Result<usize, Error> {
                 long: *long,
                 recursive: *recursive,
                 json: *json,
+                sort: if *unsorted {
+                    SortKey::None
+                } else if *sort_size {
+                    SortKey::Size
+                } else if *sort_time {
+                    SortKey::Time
+                } else {
+                    SortKey::Name
+                },
+                reverse: *reverse,
             };
             cmd::ls::run(fs.as_ref(), paths, opts, &mut out)?
         }
-        Command::Tree { level, json, path } => {
+        Command::Tree {
+            level,
+            json,
+            dirs_first,
+            path,
+        } => {
             let fs = wpd::open(cli.device)?;
             let path = path.clone().unwrap_or_else(DevicePath::root);
-            cmd::tree::run(fs.as_ref(), &path, *level, *json, &mut out)?
+            cmd::tree::run(fs.as_ref(), &path, *level, *json, *dirs_first, &mut out)?
         }
         Command::Cp {
             recursive,

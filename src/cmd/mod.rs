@@ -2,6 +2,7 @@
 
 pub mod cp;
 pub mod ls;
+pub mod sort;
 pub mod tree;
 
 use std::io::Write;
