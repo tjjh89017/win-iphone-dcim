@@ -1,11 +1,11 @@
 # Release workflow.
 #
 # Triggered by a pushed "v*" tag. The build job builds the Windows x64 and
-# ARM64 release binaries on windows-latest and writes a SHA256SUMS-<artifact>.txt
-# file per target. The publish job then writes one SHA256SUMS.txt for both
-# binaries and attaches all files to one draft GitHub release. One job
-# creates the release, so the matrix cells cannot race to create two drafts.
-# Steps live in `.github/actions/*`.
+# ARM64 release binaries (CLI and GUI) on windows-latest and writes a
+# SHA256SUMS-<artifact>.txt file per target for both files. The publish job
+# then writes one SHA256SUMS.txt for all binaries and attaches all files to
+# one draft GitHub release. One job creates the release, so the matrix cells
+# cannot race to create two drafts. Steps live in `.github/actions/*`.
 #
 # No lint/test job here: the tagged commit is expected to have already
 # passed main.yaml on main, so re-running it on the tag would only repeat
@@ -34,8 +34,10 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             artifact: win-iphone-dcim-windows-x64
+            gui-artifact: win-iphone-dcim-gui-windows-x64
           - target: aarch64-pc-windows-msvc
             artifact: win-iphone-dcim-windows-arm64
+            gui-artifact: win-iphone-dcim-gui-windows-arm64
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
@@ -51,17 +53,23 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Rename the binary and write the checksum
+      - name: Rename the binaries and write the checksums
         shell: pwsh
         env:
           EXE: ${{ steps.build.outputs.exe }}
+          GUI_EXE: ${{ steps.build.outputs.gui-exe }}
           ARTIFACT: ${{ matrix.artifact }}
+          GUI_ARTIFACT: ${{ matrix.gui-artifact }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $name = "$env:ARTIFACT.exe"
-          Copy-Item -Path $env:EXE -Destination "dist/$name"
-          $hash = (Get-FileHash -Algorithm SHA256 -Path "dist/$name").Hash.ToLower()
-          "$hash  $name" | Out-File -FilePath "dist/SHA256SUMS-$env:ARTIFACT.txt" -Encoding ascii
+          $lines = @()
+          foreach ($pair in @(@($env:EXE, "$env:ARTIFACT.exe"), @($env:GUI_EXE, "$env:GUI_ARTIFACT.exe"))) {
+            $name = $pair[1]
+            Copy-Item -Path $pair[0] -Destination "dist/$name"
+            $hash = (Get-FileHash -Algorithm SHA256 -Path "dist/$name").Hash.ToLower()
+            $lines += "$hash  $name"
+          }
+          $lines | Out-File -FilePath "dist/SHA256SUMS-$env:ARTIFACT.txt" -Encoding ascii
 
       - name: Upload the release files
         uses: actions/upload-artifact@v7

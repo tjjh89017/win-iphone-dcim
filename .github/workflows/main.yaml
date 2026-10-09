@@ -1,7 +1,8 @@
 # CI workflow.
 #
 # Checks format and clippy, runs the unit tests, then builds the Windows x64
-# and ARM64 release binaries and uploads them as artifacts. Steps live in
+# and ARM64 release binaries (CLI and GUI) and uploads them as artifacts, one
+# artifact per target with both files. Steps live in
 # `.github/actions/*`.
 #
 # Every job runs on windows-latest: the binary uses Windows Portable Devices.
@@ -90,11 +91,13 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Upload the release binary
+      - name: Upload the release binaries
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ steps.build.outputs.exe }}
+          path: |
+            ${{ steps.build.outputs.exe }}
+            ${{ steps.build.outputs.gui-exe }}
           retention-days: 7
           if-no-files-found: error
 

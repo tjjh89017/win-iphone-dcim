@@ -1,5 +1,5 @@
 name: 'Build'
-description: 'Build the Windows release binary for one target into target/<target>/release.'
+description: 'Build the Windows release binaries (CLI and GUI) for one target into target/<target>/release.'
 
 inputs:
   target:
@@ -8,13 +8,16 @@ inputs:
 
 outputs:
   exe:
-    description: 'Path of the built release binary'
+    description: 'Path of the built CLI release binary'
     value: ${{ steps.build.outputs.exe }}
+  gui-exe:
+    description: 'Path of the built GUI release binary'
+    value: ${{ steps.build.outputs.gui-exe }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Build the release binary
+    - name: Build the release binaries
       id: build
       shell: pwsh
       env:
@@ -23,3 +26,4 @@ runs:
         cargo build --release --locked --target $env:TARGET
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         "exe=target/$env:TARGET/release/win-iphone-dcim.exe" >> $env:GITHUB_OUTPUT
+        "gui-exe=target/$env:TARGET/release/win-iphone-dcim-gui.exe" >> $env:GITHUB_OUTPUT
