@@ -12,6 +12,7 @@ pub mod config;
 pub mod copyview;
 pub mod device;
 pub mod filedesc;
+pub mod menu;
 pub mod nav;
 pub mod selection;
 

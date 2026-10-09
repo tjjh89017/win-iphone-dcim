@@ -23,6 +23,7 @@ use super::dataobject::{self, DataObject, PasteShared};
 use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
 use super::dnd;
 use super::filedesc::{self, Listing};
+use super::menu::{self, MenuState};
 use super::nav::{NavHistory, breadcrumbs};
 use super::selection::{Check, Entry, ListSelection, Tree, band_rows, sort_rows};
 use super::shell;
@@ -153,6 +154,17 @@ enum Action {
     Up,
     /// A click on a column header.
     SortBy(SortKey),
+    /// Sort by this column, descending if true.
+    SetSort(SortKey, bool),
+    RefreshDevices,
+    PickDestination,
+    /// Copy the checked items into the destination.
+    CopyChecked,
+    CancelCopy,
+    /// Delete the cache of the open device.
+    ClearCache,
+    ShowAbout,
+    Exit,
 }
 
 /// The press point of a rubber-band drag: screen x, and y in list content
@@ -196,6 +208,8 @@ struct App {
     rows: ListSelection,
     /// The object in the properties window.
     properties: Option<String>,
+    /// The About window is open.
+    about: bool,
     /// The rubber-band drag in the file list.
     band: Option<Band>,
     dest: Option<PathBuf>,
@@ -247,6 +261,7 @@ impl App {
             sort: (SortKey::Name, false),
             rows: ListSelection::default(),
             properties: None,
+            about: false,
             band: None,
             dest: None,
             force: false,
@@ -922,6 +937,36 @@ impl App {
                 Action::CollapseAll(path) => self.collapse_all(&path),
                 Action::ExplorerCopy(paths) => self.explorer_copy(paths),
                 Action::DragOut(paths) => self.drag_out(paths),
+                Action::SetSort(key, descending) => self.sort = (key, descending),
+                Action::RefreshDevices => {
+                    self.status = "Looking for devices...".into();
+                    self.send(Request::ListDevices);
+                }
+                Action::PickDestination => {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.dest = Some(dir);
+                    }
+                }
+                Action::CopyChecked => {
+                    if !self.copying {
+                        self.copy_checked();
+                    }
+                }
+                Action::CancelCopy => {
+                    if self.copying
+                        && let Some(d) = &self.device
+                    {
+                        d.cancel.store(true, Ordering::SeqCst);
+                        self.copy_status = if self.copy.scanning {
+                            "Cancel: the scan stops now".into()
+                        } else {
+                            "Cancel: the copy stops after the current file".into()
+                        };
+                    }
+                }
+                Action::ClearCache => self.send(Request::ClearCache),
+                Action::ShowAbout => self.about = true,
+                Action::Exit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
     }
@@ -963,7 +1008,254 @@ impl App {
         self.send(Request::Download { path });
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    /// The facts that decide which menu and top bar items are enabled.
+    fn menu_state(&self) -> MenuState {
+        let checked = self
+            .tree
+            .as_ref()
+            .is_some_and(|t| !t.selection().is_empty());
+        let one_cached_file = match (&self.tree, &self.folder) {
+            (Some(t), Some(f)) if self.rows.len() == 1 => self
+                .rows
+                .paths(t.children(f).unwrap_or_default())
+                .first()
+                .is_some_and(|p| self.cached(p).is_some()),
+            _ => false,
+        };
+        let rows = match (&self.tree, &self.folder) {
+            (Some(t), Some(f)) => t.children(f).map_or(0, <[String]>::len),
+            _ => 0,
+        };
+        MenuState {
+            device_open: self.tree.is_some(),
+            has_dest: self.dest.is_some(),
+            checked,
+            highlighted: self.rows.len(),
+            one_cached_file,
+            rows,
+            copying: self.copying,
+            explorer: self.paste.is_some(),
+        }
+    }
+
+    /// The highlighted rows in row order, or the checked items if no row
+    /// is highlighted.
+    fn menu_targets(&self) -> Vec<String> {
+        let rows = self.rows.paths(&self.list_rows());
+        if !rows.is_empty() {
+            return rows;
+        }
+        self.tree
+            .as_ref()
+            .map(|t| t.selection().top_paths())
+            .unwrap_or_default()
+    }
+
+    /// File, Edit, View and Help. The items push the same actions as the
+    /// top bar, the context menus and the shortcuts.
+    fn menu_bar(&mut self, ui: &mut egui::Ui, state: MenuState, actions: &mut Vec<Action>) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Refresh devices").clicked() {
+                    actions.push(Action::RefreshDevices);
+                }
+                if ui.button("Destination...").clicked() {
+                    actions.push(Action::PickDestination);
+                }
+                if ui
+                    .add_enabled(state.copy_to_folder(), Button::new("Copy to folder"))
+                    .on_hover_text("Copy the checked items into the destination")
+                    .clicked()
+                {
+                    actions.push(Action::CopyChecked);
+                }
+                if ui
+                    .add_enabled(state.copy_to(), Button::new("Copy to..."))
+                    .on_hover_text("Pick a folder, then copy the selected or checked items")
+                    .clicked()
+                {
+                    actions.push(Action::CopyTo(self.menu_targets()));
+                }
+                if ui
+                    .add_enabled(state.cancel(), Button::new("Cancel copy"))
+                    .clicked()
+                {
+                    actions.push(Action::CancelCopy);
+                }
+                ui.checkbox(&mut self.force, "Overwrite existing (--force)");
+                ui.separator();
+                let one = self.menu_targets();
+                if ui
+                    .add_enabled(state.one_row(), Button::new("Open").shortcut_text("Enter"))
+                    .clicked()
+                    && let [path] = one.as_slice()
+                {
+                    actions.push(Action::Open(path.clone()));
+                }
+                if ui
+                    .add_enabled(state.open_cache_folder(), Button::new("Open cache folder"))
+                    .on_hover_text(self.cache_info())
+                    .clicked()
+                    && let [path] = one.as_slice()
+                {
+                    actions.push(Action::OpenCacheFolder(path.clone()));
+                }
+                if ui
+                    .add_enabled(state.one_row(), Button::new("Properties"))
+                    .clicked()
+                    && let [path] = one.as_slice()
+                {
+                    actions.push(Action::Properties(path.clone()));
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(state.clear_cache(), Button::new("Clear cache"))
+                    .on_hover_text(format!(
+                        "Delete the cache of the open device\n{}",
+                        self.cache_info()
+                    ))
+                    .clicked()
+                {
+                    actions.push(Action::ClearCache);
+                }
+                ui.checkbox(&mut self.clear_cache_on_exit, "Clear cache on exit");
+                ui.separator();
+                if ui
+                    .add(Button::new("Exit").shortcut_text("Alt+F4"))
+                    .clicked()
+                {
+                    actions.push(Action::Exit);
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui
+                    .add_enabled(
+                        state.select_all(),
+                        Button::new("Select all").shortcut_text("Ctrl+A"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::SelectAll);
+                }
+                if ui
+                    .add_enabled(
+                        state.clear_selection(),
+                        Button::new("Deselect all").shortcut_text("Esc"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::DeselectAll);
+                }
+                ui.separator();
+                let root = self.tree.as_ref().map(|t| vec![t.root().to_owned()]);
+                if ui
+                    .add_enabled(state.check_all(), Button::new("Check all"))
+                    .clicked()
+                    && let Some(root) = root.clone()
+                {
+                    actions.push(Action::SetChecked(root, true));
+                }
+                if ui
+                    .add_enabled(state.uncheck_all(), Button::new("Uncheck all"))
+                    .clicked()
+                    && let Some(root) = root
+                {
+                    actions.push(Action::SetChecked(root, false));
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        state.explorer_copy(),
+                        Button::new(EXPLORER_COPY).shortcut_text("Ctrl+C"),
+                    )
+                    .on_hover_text("Copy the selected rows, or the checked items")
+                    .clicked()
+                {
+                    actions.push(Action::ExplorerCopy(self.menu_targets()));
+                }
+            });
+            ui.menu_button("View", |ui| {
+                if ui
+                    .add_enabled(
+                        self.nav.can_back(),
+                        Button::new("Back").shortcut_text("Alt+Left"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::Back);
+                }
+                if ui
+                    .add_enabled(
+                        self.nav.can_forward(),
+                        Button::new("Forward").shortcut_text("Alt+Right"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::Forward);
+                }
+                if ui
+                    .add_enabled(self.nav.can_up(), Button::new("Up").shortcut_text("Alt+Up"))
+                    .clicked()
+                {
+                    actions.push(Action::Up);
+                }
+                ui.separator();
+                let folder = self.folder.clone().filter(|_| self.tree.is_some());
+                if ui
+                    .add_enabled(folder.is_some(), Button::new("Refresh folder"))
+                    .clicked()
+                    && let Some(f) = folder
+                {
+                    actions.push(Action::Reload(f));
+                }
+                ui.separator();
+                let (key, descending) = self.sort;
+                for (label, k) in [
+                    ("Sort by name", SortKey::Name),
+                    ("Sort by size", SortKey::Size),
+                    ("Sort by modified", SortKey::Time),
+                ] {
+                    if ui.radio(key == k, label).clicked() {
+                        actions.push(Action::SetSort(k, descending));
+                    }
+                }
+                ui.separator();
+                if ui.radio(!descending, "Ascending").clicked() {
+                    actions.push(Action::SetSort(key, false));
+                }
+                if ui.radio(descending, "Descending").clicked() {
+                    actions.push(Action::SetSort(key, true));
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("About...").clicked() {
+                    actions.push(Action::ShowAbout);
+                }
+            });
+        });
+    }
+
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.about;
+        egui::Window::new("About")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("win-iphone-dcim");
+                ui.label(format!("Version {}", crate::VERSION));
+                ui.label(env!("CARGO_PKG_DESCRIPTION"));
+                ui.hyperlink(env!("CARGO_PKG_REPOSITORY"));
+                ui.label(menu::copyright(env!("CARGO_PKG_AUTHORS")));
+                ui.label(format!(
+                    "Licensed under the {}",
+                    menu::license_name(env!("CARGO_PKG_LICENSE"))
+                ));
+            });
+        self.about = open;
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, state: MenuState, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Device:");
             let name = self
@@ -992,14 +1284,11 @@ impl App {
                 self.open_device(i);
             }
             if ui.button("Refresh").clicked() {
-                self.status = "Looking for devices...".into();
-                self.send(Request::ListDevices);
+                actions.push(Action::RefreshDevices);
             }
             ui.separator();
-            if ui.button("Destination...").clicked()
-                && let Some(dir) = rfd::FileDialog::new().pick_folder()
-            {
-                self.dest = Some(dir);
+            if ui.button("Destination...").clicked() {
+                actions.push(Action::PickDestination);
             }
             let dest = self
                 .dest
@@ -1010,39 +1299,25 @@ impl App {
             ui.checkbox(&mut self.force, "Overwrite existing (--force)");
             ui.checkbox(&mut self.clear_cache_on_exit, "Clear cache on exit");
             if self.copying {
-                if ui.button("Cancel").clicked()
-                    && let Some(d) = &self.device
-                {
-                    d.cancel.store(true, Ordering::SeqCst);
-                    self.copy_status = if self.copy.scanning {
-                        "Cancel: the scan stops now".into()
-                    } else {
-                        "Cancel: the copy stops after the current file".into()
-                    };
+                if ui.button("Cancel").clicked() {
+                    actions.push(Action::CancelCopy);
                 }
-            } else {
-                let ready = self.dest.is_some()
-                    && self
-                        .tree
-                        .as_ref()
-                        .is_some_and(|t| !t.selection().is_empty());
-                if ui
-                    .add_enabled(ready, Button::new("Copy to folder"))
-                    .on_hover_text("Copy the checked items into the destination")
-                    .clicked()
-                {
-                    self.copy_checked();
-                }
+            } else if ui
+                .add_enabled(state.copy_to_folder(), Button::new("Copy to folder"))
+                .on_hover_text("Copy the checked items into the destination")
+                .clicked()
+            {
+                actions.push(Action::CopyChecked);
             }
             if ui
-                .add_enabled(self.tree.is_some(), Button::new("Clear cache"))
+                .add_enabled(state.clear_cache(), Button::new("Clear cache"))
                 .on_hover_text(format!(
                     "Delete the cache of the open device\n{}",
                     self.cache_info()
                 ))
                 .clicked()
             {
-                self.send(Request::ClearCache);
+                actions.push(Action::ClearCache);
             }
             ui.separator();
             ui.label(&self.status);
@@ -1674,8 +1949,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         let mut actions = Vec::new();
+        let state = self.menu_state();
+        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, state, &mut actions));
+        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, state, &mut actions));
         egui::Panel::bottom("bottom")
             .resizable(true)
             .default_size(180.0)
@@ -1687,6 +1964,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| self.file_list(ui, &mut actions));
         let ctx = ui.ctx().clone();
         self.properties_window(&ctx);
+        self.about_window(&ctx);
         self.apply(actions);
         if self.copying || self.download.is_some() || self.paste_busy() || self.clip_wait.is_some()
         {

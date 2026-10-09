@@ -218,6 +218,16 @@ an error and cannot open a device.
 
 The window:
 
+- Menu bar: File (Refresh devices, Destination..., Copy to folder, Copy
+  to..., Cancel copy, Overwrite existing, Open, Open cache folder,
+  Properties, Clear cache, Clear cache on exit, Exit), Edit (Select all,
+  Deselect all, Check all, Uncheck all, Copy (paste in Explorer)), View
+  (Back, Forward, Up, Refresh folder, sort column and order) and Help
+  (About: version, repository link, copyright and license). The items do
+  the same as the top bar, the right-click menus and the shortcuts, and are
+  disabled under the same conditions. Copy to..., Copy (paste in Explorer),
+  Open, Open cache folder and Properties act on the selected rows, or on
+  the checked items when no row is selected.
 - Top bar: the device list, Refresh, the destination folder (Destination...),
   "Overwrite existing (--force)", "Copy to folder" (Cancel while a copy runs), Clear
   cache, and a status text. Refresh lists the devices again and reloads the

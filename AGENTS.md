@@ -17,7 +17,7 @@ A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an i
 
 ## Test strategy
 
-- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`, `gui/selection`, `gui/device`, `gui/cache`, `gui/config`, `gui/filedesc`, `gui/chunks`, `gui/nav`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
+- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`, `gui/selection`, `gui/device`, `gui/cache`, `gui/config`, `gui/filedesc`, `gui/chunks`, `gui/nav`, `gui/menu`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
 - Command logic runs against the `DeviceFs` trait. Tests use the in-memory fake in `device_fs::fake`.
 - The fake is compiled only in unit tests and with the `fake-device` cargo feature. Release builds do not enable the feature. Gate fake-only code with `#[cfg(any(test, feature = "fake-device"))]`.
 - Run all tests, end-to-end included, with `scripts/dev.sh test --features fake-device`. Without the feature, cargo skips `tests/e2e.rs`.

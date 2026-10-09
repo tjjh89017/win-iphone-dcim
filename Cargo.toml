@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
+authors = ["Date Huang"]
 description = "Read-only iPhone DCIM backup for Windows. Copies photos and videos over WPD and keeps the folder structure that File Explorer shows."
 repository = "https://github.com/tjjh89017/win-iphone-dcim"
 readme = "README.md"
@@ -41,7 +42,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 
 [target.'cfg(windows)'.dependencies]
 # GUI toolkit. The glow (OpenGL) renderer keeps the ARM64 build simple.
-eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+# "links" opens hyperlinks (Help > About) in the default browser.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "links"] }
 # Table with resizable columns for the file list.
 egui_extras = { version = "0.36.2", default-features = false }
 rfd = "0.17.2"
