@@ -8,8 +8,8 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 ## Status
 
 Phase 1, 2 and 3 complete. Phase 4 (GUI) in progress: browsing, double-click
-open and in-app copy work; the Explorer paste is not done yet. See [SPEC.md](SPEC.md) for the
-full plan.
+open, in-app copy, and Explorer paste and drag-and-drop work. See [SPEC.md](SPEC.md) for the
+full plan. Release v0.1.0 is published.
 
 Works now:
 
@@ -29,32 +29,42 @@ Works now:
   call cannot hang the tool. See [Worker process](#worker-process).
 
 - `win-iphone-dcim-gui.exe`: a window to browse the device, open a file with
-  its default application, and copy the checked folders and files. See
-  [GUI](#gui).
-
-Planned:
-
-- Copy and paste or drag and drop from the GUI into File Explorer (Phase 4).
+  its default application, copy the checked folders and files, and paste or
+  drag and drop them into File Explorer. See [GUI](#gui).
 
 ### Verification scope
 
-No real-device test has run yet. All automated tests use the in-memory fake
-device, on Linux and on `windows-latest`. Use the
-[checklist](#testing-on-a-real-iphone) below for the first real-device run.
+Status on real hardware as of 2026-10-09: the GUI starts on Windows x64 and
+lists a connected iPhone. The worker console window bug was found on real
+hardware and fixed. Nothing else is verified on real hardware: no WPD copy,
+no Explorer paste, no folder-name check (SPEC section 2), and no ARM64 test.
+All automated tests use the in-memory fake device, on Linux and on
+`windows-latest`. Use the [checklist](#testing-on-a-real-iphone) below for
+the next real-device run.
 
 ## Download
 
-Open the [main workflow runs](https://github.com/tjjh89017/win-iphone-dcim/actions/workflows/main.yaml)
+Open the [Releases page](https://github.com/tjjh89017/win-iphone-dcim/releases/tag/v0.1.0)
+and download the zip for your CPU, with `SHA256SUMS.txt` to check it:
+
+- `win-iphone-dcim-windows-x64.zip`
+- `win-iphone-dcim-windows-arm64.zip`
+- `SHA256SUMS.txt`
+
+Each zip holds `win-iphone-dcim.exe` (CLI), `win-iphone-dcim-gui.exe` (GUI),
+`LICENSE` and `README.md`. Extract both programs into one folder. The GUI
+needs the CLI next to it (see [GUI](#gui)).
+
+For the latest `main` build, open the
+[main workflow runs](https://github.com/tjjh89017/win-iphone-dcim/actions/workflows/main.yaml)
 and select a green run. Every run on `main` uploads two artifacts:
 
 - `win-iphone-dcim-windows-x64`
 - `win-iphone-dcim-windows-arm64`
 
-Each artifact holds `win-iphone-dcim.exe` (CLI) and `win-iphone-dcim-gui.exe`
-(GUI). Keep both files in the same folder.
-
-You must log in to GitHub to download artifacts. Artifacts expire after 7
-days. The ARM64 binary is built but not tested on hardware.
+Each artifact holds the two exe files. You must log in to GitHub to download
+artifacts. Artifacts expire after 7 days. The ARM64 binary is built but not
+tested on hardware.
 
 With the GitHub CLI:
 
@@ -62,13 +72,8 @@ With the GitHub CLI:
 gh run download <run-id> -n win-iphone-dcim-windows-x64
 ```
 
-A pushed `v*` tag builds a draft GitHub release with
-`win-iphone-dcim-windows-x64.zip`, `win-iphone-dcim-windows-arm64.zip` and
-one `SHA256SUMS.txt` over the zip files. Each zip holds
-`win-iphone-dcim.exe`, `win-iphone-dcim-gui.exe`, `LICENSE` and `README.md`.
-Extract both programs into one folder; the GUI needs the CLI next to it (see
-[GUI](#gui)).
-No release is published yet.
+A pushed `v*` tag builds a draft GitHub release with the same zip files and
+`SHA256SUMS.txt`.
 
 ## Requirements
 
@@ -324,7 +329,7 @@ Limits of this mode:
 Limits:
 
 - Device requests run one at a time: while a copy runs, folder listings wait.
-- The GUI is not tested on a real device yet.
+- Real-hardware status: see [Verification scope](#verification-scope). Only the GUI start and the device list are verified.
 
 ## Manifest and incremental copy
 
@@ -411,7 +416,7 @@ The exit code is 0 if all files are ok, 1 otherwise.
 
 ## Testing on a real iPhone
 
-No real-device test has run yet. Run this checklist on Windows with an
+Only the GUI start and the device list are verified on real hardware (see [Verification scope](#verification-scope)). Run this checklist on Windows with an
 iPhone attached, unlocked and trusted. Use a new empty folder for DEST, for
 example `D:\iPhoneTest`.
 

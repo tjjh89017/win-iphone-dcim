@@ -406,7 +406,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 - [ ] Test on a minimum of two iPhone/iOS combinations. If only one combination is available, state the verification scope clearly.
 - [x] Add mock backend / fixture tests for use without an iPhone, behind the `fake-device` cargo feature, not in release builds. CI must not depend on hardware.
 
-Verification scope as of 2026-10-09: no real-device test has run yet. All tests use the in-memory fake device.
+Verification scope as of 2026-10-09: on real hardware, the GUI starts on Windows x64 and lists the iPhone. No copy from a real iPhone has run yet. All automated tests use the in-memory fake device.
 
 ### Phase 4 — GUI (last phase, optional)
 
