@@ -15,6 +15,10 @@ pub mod selection;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod dataobject;
+#[cfg(windows)]
+mod dnd;
+#[cfg(windows)]
 mod shell;
 
 use std::process::ExitCode;

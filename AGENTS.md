@@ -17,7 +17,7 @@ A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an i
 
 ## Test strategy
 
-- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`, `gui/selection`, `gui/device`, `gui/cache`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
+- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`, `gui/selection`, `gui/device`, `gui/cache`, `gui/filedesc`, `gui/chunks`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
 - Command logic runs against the `DeviceFs` trait. Tests use the in-memory fake in `device_fs::fake`.
 - The fake is compiled only in unit tests and with the `fake-device` cargo feature. Release builds do not enable the feature. Gate fake-only code with `#[cfg(any(test, feature = "fake-device"))]`.
 - Run all tests, end-to-end included, with `scripts/dev.sh test --features fake-device`. Without the feature, cargo skips `tests/e2e.rs`.
@@ -41,6 +41,9 @@ A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an i
 - `gui/app.rs` and `gui/shell.rs` are Windows only (`#[cfg(windows)]`). eframe and rfd are Windows-only dependencies.
 - Test the GUI logic (selection, cache paths, device thread) on Linux with the fake device. egui drawing has no unit tests.
 - The GUI starts `win-iphone-dcim.exe` from its own folder as the worker.
+- The GUI UI thread is an OLE STA apartment (`OleInitialize`). The OLE clipboard, `DoDragDrop` and the `IDataObject` live on it. Never call `CoInitializeEx` with MTA on the UI thread.
+- The device thread never touches OLE or COM. Paste streams (`IStream`) live in the process MTA and get their bytes from the device thread through the bounded channel in `gui/chunks`.
+- `gui/filedesc` and `gui/chunks` are portable and have unit tests. `gui/dataobject` and `gui/dnd` are Windows only and are checked by xwin clippy; test the Explorer interaction by hand on Windows.
 
 ## Code
 

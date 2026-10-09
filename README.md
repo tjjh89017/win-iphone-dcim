@@ -225,8 +225,9 @@ The window:
   on empty space or on a row that is not selected, then drag: a selection
   rectangle selects every row it touches (rubber band). With Ctrl held when
   the drag starts, the rows add to the selection. The list scrolls when you
-  drag past its top or bottom edge. A drag that starts on a selected row does
-  nothing yet; it is kept for the drag and drop to File Explorer.
+  drag past its top or bottom edge. A drag that starts on a selected row
+  drags the selected items to File Explorer (see below). Ctrl+C copies the
+  selected rows for a paste in File Explorer.
 - Bottom: the progress of the current file (speed and ETA), the overall
   progress, and a log of skip, retry and error lines.
 
@@ -234,8 +235,8 @@ Right-click menus:
 
 | Where | Items |
 | --- | --- |
-| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (for Explorer paste) (disabled, next step), Check, Uncheck, Properties |
-| A folder (list or tree) | Open, Copy to..., Copy (for Explorer paste) (disabled), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
+| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (for Explorer paste), Check, Uncheck, Properties |
+| A folder (list or tree) | Open, Copy to..., Copy (for Explorer paste), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
 | Empty space in the list | Refresh, Select all, Deselect all |
 
 In the list, a menu on a selected row acts on all selected rows. Open is
@@ -264,9 +265,39 @@ HEVC videos need the "HEIF Image Extensions" and "HEVC Video Extensions" from
 the Microsoft Store; the GUI shows this hint when Windows has no application
 for the file type.
 
+### Copy and paste or drag and drop to File Explorer
+
+"Copy (for Explorer paste)" in a right-click menu, or Ctrl+C in the file
+list, puts the selected items on the clipboard. Folders include everything
+below them. The status text shows "N items copied. Paste in File Explorer."
+when the folders are listed. Then paste in any File Explorer folder.
+
+You can also drag selected rows from the file list and drop them on a File
+Explorer window or the desktop. Only copy is offered; Explorer never moves
+or deletes files on the iPhone.
+
+File Explorer shows its own progress dialog and its own "Replace or Skip
+Files" dialog. The GUI adds no dialog. The status text shows "Explorer is
+reading N of M" while Explorer reads.
+
+Limits of this mode:
+
+- Explorer reads every file through this window. Keep the window open until
+  the paste completes. If you close it during a paste, the GUI asks first
+  ("Close anyway"); Explorer then reports an error for the remaining files.
+- The speed is the same as the CLI and the in-app copy, not faster.
+- Explorer decides replace or skip. There is no manifest, no verification
+  and no incremental skip of verified files. Use Copy or "Copy to..." for
+  those.
+- A path under the copied folder longer than 259 characters is left out,
+  with a line in the log.
+- A WPD hang stops the paste until the worker restarts (120 s without
+  activity); Explorer then reports an error for that file.
+- Device requests run one at a time: Explorer waits while an in-app copy
+  runs.
+
 Limits:
 
-- No copy and paste or drag and drop into File Explorer yet.
 - Device requests run one at a time: while a copy runs, folder listings wait.
 - The GUI is not tested on a real device yet.
 

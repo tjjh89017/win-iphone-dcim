@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -11,8 +12,15 @@ use eframe::egui::{
     self, Align, Button, Checkbox, Label, Layout, ProgressBar, RichText, Sense, UiBuilder,
 };
 
+use windows::Win32::System::Com::IDataObject;
+
 use super::cache;
-use super::device::{CopyProgress, CopySet, DeviceHandle, Reply, Request, WorkerConnector};
+use super::chunks::Pending;
+use super::dataobject::{self, DataObject, PasteShared};
+use super::device::{
+    CopyProgress, CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector,
+};
+use super::dnd;
 use super::selection::{Check, Entry, ListSelection, Tree, band_rows};
 use super::shell;
 use crate::backup::engine::Note;
@@ -25,11 +33,16 @@ const SIZE_WIDTH: f32 = 90.0;
 const DATE_WIDTH: f32 = 150.0;
 /// Windows fonts for names that the default fonts cannot draw (CJK).
 const FALLBACK_FONTS: [&str; 3] = ["msyh.ttc", "YuGothM.ttc", "malgun.ttf"];
-const PASTE_PLACEHOLDER: &str = "Copy (for Explorer paste)";
+const EXPLORER_COPY: &str = "Copy (for Explorer paste)";
+/// Pointer travel before a drag from a selected row starts `DoDragDrop`.
+const DRAG_DISTANCE: f32 = 6.0;
 /// Largest scroll step per frame while a rubber band is past an edge.
 const BAND_SCROLL_MAX: f32 = 30.0;
 
 pub fn run() -> ExitCode {
+    // OLE clipboard and drag and drop need an STA on this thread. winit
+    // also calls OleInitialize for its drop target; the calls nest.
+    let ole = dataobject::ole_init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("win-iphone-dcim")
@@ -46,6 +59,9 @@ pub fn run() -> ExitCode {
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
     );
+    if ole {
+        dataobject::ole_uninit();
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -113,6 +129,10 @@ enum Action {
     /// The band now covers these rows of the file list.
     BandUpdate(std::ops::Range<usize>),
     BandEnd,
+    /// Put these paths on the clipboard for a paste in File Explorer.
+    ExplorerCopy(Vec<String>),
+    /// Drag these paths to File Explorer.
+    DragOut(Vec<String>),
 }
 
 /// The press point of a rubber-band drag: screen x, and y in list content
@@ -157,6 +177,19 @@ struct App {
     copying: bool,
     copy: Option<CopyProgress>,
     download: Option<Download>,
+    /// Shared by the data objects and streams of Explorer pastes.
+    paste: Option<Arc<PasteShared>>,
+    /// A clipboard copy that waits for its folder walk.
+    clip_wait: Option<Arc<Pending<ListingResult>>>,
+    /// The data object that this app put on the clipboard.
+    clipboard: Option<IDataObject>,
+    /// What Explorer reads now.
+    paste_status: Option<String>,
+    /// The user asked to close while Explorer reads.
+    close_warning: bool,
+    close_anyway: bool,
+    /// `DoDragDrop` ate the button release; send egui one.
+    release_pointer: bool,
 }
 
 impl App {
@@ -181,6 +214,13 @@ impl App {
             copying: false,
             copy: None,
             download: None,
+            paste: None,
+            clip_wait: None,
+            clipboard: None,
+            paste_status: None,
+            close_warning: false,
+            close_anyway: false,
+            release_pointer: false,
         };
         match WorkerCommand::cli_next_to_current_exe() {
             Ok(worker) => {
@@ -194,6 +234,7 @@ impl App {
                     Box::new(move || wake_ctx.request_repaint()),
                 );
                 handle.send(Request::ListDevices);
+                app.paste = Some(PasteShared::new(handle.sender()));
                 app.device = Some(handle);
                 app.status = "Looking for devices...".into();
             }
@@ -343,9 +384,105 @@ impl App {
                 Ok(()) => self.status = format!("Opened {}", local.display()),
                 Err(e) => self.error(format!("Cannot open {}: {e}", local.display())),
             },
-            // The Explorer paste replies come with the data object.
-            Reply::PasteNote(_) | Reply::PasteProgress { .. } | Reply::PasteFileDone { .. } => {}
+            Reply::PasteNote(text) => self.push_log(text),
+            Reply::PasteProgress {
+                number,
+                files,
+                path,
+                bytes,
+            } => {
+                self.paste_status = Some(format!(
+                    "Explorer is reading {number} of {files}: {}  {}",
+                    file_name(&path),
+                    human_size(bytes)
+                ));
+            }
+            Reply::PasteFileDone {
+                number,
+                files,
+                path,
+                result,
+            } => match result {
+                Ok(_) => {
+                    self.paste_status = (number < files)
+                        .then(|| format!("Explorer is reading {number} of {files}..."));
+                    if number == files {
+                        self.status = format!("Explorer read {files} file(s)");
+                    }
+                }
+                Err(e) => {
+                    self.paste_status = None;
+                    self.error(format!("Explorer paste of {path} failed: {e}"));
+                }
+            },
         }
+    }
+
+    /// Start a clipboard copy of `paths`. The data object goes on the
+    /// clipboard when the device thread has walked the folders.
+    fn explorer_copy(&mut self, paths: Vec<String>) {
+        if paths.is_empty() || self.paste.is_none() {
+            return;
+        }
+        let slot = Arc::new(Pending::default());
+        self.status = format!("Preparing {} item(s) for File Explorer...", paths.len());
+        self.send(Request::Enumerate {
+            paths,
+            slot: Arc::clone(&slot),
+        });
+        self.clip_wait = Some(slot);
+    }
+
+    /// Put the waiting clipboard copy on the clipboard once it is listed.
+    fn finish_explorer_copy(&mut self) {
+        let Some(result) = self.clip_wait.as_ref().and_then(|s| s.get()) else {
+            return;
+        };
+        let (Some(slot), Some(shared)) = (self.clip_wait.take(), self.paste.clone()) else {
+            return;
+        };
+        let listing = match result {
+            Ok(l) => l,
+            Err(e) => return self.error(format!("Cannot copy for Explorer: {e}")),
+        };
+        if listing.is_empty() {
+            return self.error("Nothing to copy for Explorer".into());
+        }
+        let obj = DataObject::create(slot, shared);
+        match dataobject::set_clipboard(&obj) {
+            Ok(()) => {
+                self.status = format!("{} item(s) copied. Paste in File Explorer.", listing.len());
+                self.clipboard = Some(obj);
+            }
+            Err(e) => self.error(format!("Cannot put the copy on the clipboard: {e}")),
+        }
+    }
+
+    /// Drag `paths` to File Explorer. Blocks in the OLE drag loop.
+    fn drag_out(&mut self, paths: Vec<String>) {
+        let Some(shared) = self.paste.clone() else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let slot = Arc::new(Pending::default());
+        self.send(Request::Enumerate {
+            paths,
+            slot: Arc::clone(&slot),
+        });
+        let obj = DataObject::create(slot, shared);
+        self.release_pointer = true;
+        self.band = None;
+        match dnd::drag(&obj) {
+            Ok(true) => self.status = "Dropped. File Explorer copies the items.".into(),
+            Ok(false) => self.status = "Drag cancelled".into(),
+            Err(e) => self.error(format!("Drag and drop failed: {e}")),
+        }
+    }
+
+    fn paste_busy(&self) -> bool {
+        self.paste.as_ref().is_some_and(|p| p.busy())
     }
 
     fn open_device(&mut self, index: usize) {
@@ -553,6 +690,8 @@ impl App {
                 }
                 Action::ExpandAll(path) => self.expand_all(&path),
                 Action::CollapseAll(path) => self.collapse_all(&path),
+                Action::ExplorerCopy(paths) => self.explorer_copy(paths),
+                Action::DragOut(paths) => self.drag_out(paths),
             }
         }
     }
@@ -653,7 +792,27 @@ impl App {
             }
             ui.separator();
             ui.label(&self.status);
+            if let Some(p) = &self.paste_status {
+                ui.separator();
+                ui.label(p);
+            }
         });
+        if self.close_warning {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "File Explorer is still reading files from this window. \
+                     Closing it now makes the paste fail.",
+                );
+                if ui.button("Close anyway").clicked() {
+                    self.close_anyway = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Keep open").clicked() {
+                    self.close_warning = false;
+                }
+            });
+        }
     }
 
     fn tree_panel(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -811,9 +970,17 @@ impl App {
             actions.push(Action::CopyTo(targets.to_vec()));
             ui.close();
         }
-        // Placeholder for the Explorer paste (IDataObject) of the next step.
-        ui.add_enabled(false, Button::new(PASTE_PLACEHOLDER))
-            .on_disabled_hover_text("coming in the next step");
+        if ui
+            .add_enabled(
+                self.paste.is_some(),
+                Button::new(EXPLORER_COPY).shortcut_text("Ctrl+C"),
+            )
+            .on_hover_text("Then paste in File Explorer. Explorer shows its own progress")
+            .clicked()
+        {
+            actions.push(Action::ExplorerCopy(targets.to_vec()));
+            ui.close();
+        }
     }
 
     fn file_list(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -868,6 +1035,17 @@ impl App {
         });
         ui.separator();
         let targets = self.rows.paths(children);
+        let copy_key = ui.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                || (i.modifiers.command && i.key_pressed(egui::Key::C))
+        });
+        if copy_key && !targets.is_empty() {
+            actions.push(Action::ExplorerCopy(targets.clone()));
+        }
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        let moved = press
+            .zip(pointer)
+            .is_some_and(|(a, b)| a.distance(b) > DRAG_DISTANCE);
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.command || modifiers.ctrl;
         egui::ScrollArea::vertical()
@@ -888,10 +1066,13 @@ impl App {
                     );
                     content_top.get_or_insert(rect.top() - index as f32 * pitch);
                     let selected = self.rows.contains(path);
-                    // A drag from a selected row is kept for the future
-                    // drag and drop to Explorer. It does nothing now.
+                    // A drag from a selected row drags the selection to
+                    // Explorer; from another row it starts a rubber band.
                     if r.drag_started() && !selected {
                         band_start = band_start.or(press);
+                    }
+                    if r.dragged() && selected && moved && self.band.is_none() {
+                        actions.push(Action::DragOut(targets.clone()));
                     }
                     if selected {
                         ui.painter()
@@ -1125,8 +1306,37 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.finish_explorer_copy();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.close_anyway && self.paste_busy()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_warning = true;
+        }
+        if !self.paste_busy() {
+            self.close_warning = false;
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let (pos, modifiers) =
+                ctx.input(|i| (i.pointer.latest_pos().unwrap_or_default(), i.modifiers));
+            raw_input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            });
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A data object left on the clipboard would point to a dead process.
+        if let Some(obj) = self.clipboard.take() {
+            dataobject::clear_clipboard(&obj);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1144,7 +1354,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.properties_window(&ctx);
         self.apply(actions);
-        if self.copying || self.download.is_some() {
+        if self.copying || self.download.is_some() || self.paste_busy() || self.clip_wait.is_some()
+        {
             // Keep speed and ETA moving between progress replies.
             ctx.request_repaint_after(Duration::from_millis(250));
         }

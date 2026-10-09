@@ -162,6 +162,10 @@ win-iphone-dcim/
 │       ├── device.rs          # device thread; owns the DeviceFs
 │       ├── selection.rs       # tree model, check marks, list selection
 │       ├── cache.rs           # open-file cache paths
+│       ├── filedesc.rs        # FILEGROUPDESCRIPTORW layout and flags for the Explorer paste
+│       ├── chunks.rs          # bounded chunk channel from the device thread to a paste stream
+│       ├── dataobject.rs      # IDataObject and IStream for the Explorer paste (Windows only)
+│       ├── dnd.rs             # IDropSource and DoDragDrop (Windows only)
 │       └── shell.rs           # ShellExecuteW and Explorer (Windows only)
 └── tests/
     └── e2e.rs                 # runs the built executable against the fake device
@@ -414,10 +418,10 @@ Goal: give the user a window to select folders and files from the DCIM tree, the
 - [x] Put the cache in `%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<relative path>`. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
 - [x] Give the cached file its original file name and extension. Then Windows picks the correct application for HEIC, MOV, DNG, and other types.
 - [x] Do not open the file from the GUI before the download is complete. A partial file can crash the viewer.
-- [ ] Implement a COM `IDataObject` that offers `CFSTR_FILEDESCRIPTORW` and `CFSTR_FILECONTENTS`. Give each `FILEDESCRIPTORW` the relative path under `DCIM`, the `FD_FILESIZE` flag with the WPD size, and `FD_ATTRIBUTES` for folders. Supply each `CFSTR_FILECONTENTS` as an `IStream` that reads from the WPD stream on demand.
-- [ ] Put the `IDataObject` on the clipboard with `OleSetClipboard`. Also support drag and drop with `DoDragDrop`. Explorer pulls the data from this process, so the process must stay open until the paste completes.
-- [ ] Serve one `IStream` at a time from the worker process over IPC. Keep all WPD COM objects in the worker. Do not pass COM pointers to the GUI process.
-- [ ] Let Explorer handle conflicts. Do not add a second conflict dialog.
+- [x] Implement a COM `IDataObject` that offers `CFSTR_FILEDESCRIPTORW` and `CFSTR_FILECONTENTS`. Give each `FILEDESCRIPTORW` the relative path under `DCIM`, the `FD_FILESIZE` flag with the WPD size, and `FD_ATTRIBUTES` for folders. Supply each `CFSTR_FILECONTENTS` as an `IStream` that reads from the WPD stream on demand.
+- [x] Put the `IDataObject` on the clipboard with `OleSetClipboard`. Also support drag and drop with `DoDragDrop`. Explorer pulls the data from this process, so the process must stay open until the paste completes.
+- [x] Serve one `IStream` at a time from the worker process over IPC. Keep all WPD COM objects in the worker. Do not pass COM pointers to the GUI process.
+- [x] Let Explorer handle conflicts. Do not add a second conflict dialog.
 - [x] Add an in-app copy mode that uses the Phase 1/2 transfer engine and the manifest. Use it when the user wants verification and an incremental copy. The Explorer paste mode has no manifest and no verification.
 - [x] Use a Rust GUI toolkit that compiles with the MSVC target and does not need a web runtime. Evaluate `egui`/`eframe` first. Evaluate native Win32 controls second.
 
@@ -451,8 +455,8 @@ Known limits:
 | Double-click a HEIC file in the GUI | The tool downloads the file to the cache and opens it with the default Windows application. The device file is unchanged |
 | `cp -a` on a folder | Every copied file has the device modified time. The skip decision on a second run does not depend on it. |
 | `cp -r SRC DEST` and `cp -r SRC/ DEST` | The first creates `DEST\<name>`. The second copies the contents into `DEST`. Add tests for both |
-| Paste a selection into Explorer when a file already exists at the target | Explorer shows its own Replace or Skip dialog. The tool does not add a dialog |
-| Close the GUI during an Explorer paste | Explorer reports a copy error. No `.part` or partial file remains at the target as a complete file |
+| Paste a selection into Explorer when a file already exists at the target | Explorer shows its own Replace or Skip dialog. The tool does not add a dialog. Automated tests cover the descriptor layout; the Explorer interaction is manual |
+| Close the GUI during an Explorer paste | The GUI asks first. After "Close anyway", Explorer reports a copy error. No `.part` or partial file remains at the target as a complete file. Automated tests cover the descriptor layout; the Explorer interaction is manual |
 
 ## 12. Core design constraints / common mistakes
 
