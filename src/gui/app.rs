@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use eframe::egui::{
-    self, Align, Button, Checkbox, Label, Layout, ProgressBar, RichText, Sense, UiBuilder,
-};
+use eframe::egui::{self, Align, Button, Checkbox, Label, Layout, ProgressBar, RichText, Sense};
+use egui_extras::{Column, TableBuilder};
 
 use windows::Win32::System::Com::IDataObject;
 
@@ -22,10 +21,11 @@ use super::device::{
 };
 use super::dnd;
 use super::nav::{NavHistory, breadcrumbs};
-use super::selection::{Check, Entry, ListSelection, Tree, band_rows};
+use super::selection::{Check, Entry, ListSelection, Tree, band_rows, sort_rows};
 use super::shell;
 use crate::backup::engine::Note;
-use crate::model::{DeviceInfo, human_size, human_speed};
+use crate::cmd::sort::SortKey;
+use crate::model::{DeviceInfo, LocalTime, human_size, human_speed};
 use crate::supervisor::{DEFAULT_TIMEOUT, WorkerCommand};
 
 /// Lines kept in the log list.
@@ -137,6 +137,8 @@ enum Action {
     Back,
     Forward,
     Up,
+    /// A click on a column header.
+    SortBy(SortKey),
 }
 
 /// The press point of a rubber-band drag: screen x, and y in list content
@@ -170,6 +172,8 @@ struct App {
     folder: Option<String>,
     /// Back, Forward and Up of the file list.
     nav: NavHistory,
+    /// The sort column of the file list, and true for descending.
+    sort: (SortKey, bool),
     /// The highlighted rows of the file list.
     rows: ListSelection,
     /// The object in the properties window.
@@ -211,6 +215,7 @@ impl App {
             expanding: HashSet::new(),
             folder: None,
             nav: NavHistory::default(),
+            sort: (SortKey::Name, false),
             rows: ListSelection::default(),
             properties: None,
             band: None,
@@ -608,10 +613,17 @@ impl App {
 
     /// The rows of the file list: the children of the shown folder.
     fn list_rows(&self) -> Vec<String> {
-        match (&self.tree, &self.folder) {
-            (Some(t), Some(f)) => t.children(f).map(<[String]>::to_vec).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        let (Some(t), Some(f)) = (&self.tree, &self.folder) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<&Entry> = t
+            .children(f)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| t.entry(p))
+            .collect();
+        sort_rows(&mut entries, self.sort.0, self.sort.1);
+        entries.into_iter().map(|e| e.path.clone()).collect()
     }
 
     fn apply(&mut self, actions: Vec<Action>) {
@@ -632,6 +644,13 @@ impl App {
                 Action::Load(path) => self.load(&path),
                 Action::Reload(path) => self.reload(&path),
                 Action::ShowFolder(path) => self.enter(path),
+                Action::SortBy(key) => {
+                    self.sort = if self.sort.0 == key {
+                        (key, !self.sort.1)
+                    } else {
+                        (key, false)
+                    };
+                }
                 Action::Back => {
                     if let Some(p) = self.nav.back().map(str::to_owned) {
                         self.show(p);
@@ -1046,25 +1065,15 @@ impl App {
             }
         });
         self.nav_bar(ui, folder, actions);
-        let Some(children) = tree.children(folder) else {
+        if tree.children(folder).is_none() {
             ui.weak("loading...");
             return;
-        };
+        }
+        let rows = self.list_rows();
         let width = ui.available_width();
         let name_width = (width - SIZE_WIDTH - DATE_WIDTH - 24.0).max(120.0);
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-        ui.horizontal(|ui| {
-            column(ui, name_width, row_height, RichText::new("Name").strong());
-            column(ui, SIZE_WIDTH, row_height, RichText::new("Size").strong());
-            column(
-                ui,
-                DATE_WIDTH,
-                row_height,
-                RichText::new("Modified").strong(),
-            );
-        });
-        ui.separator();
-        let targets = self.rows.paths(children);
+        let targets = self.rows.paths(&rows);
         let copy_key = ui.input(|i| {
             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                 || (i.modifiers.command && i.key_pressed(egui::Key::C))
@@ -1084,24 +1093,80 @@ impl App {
             .is_some_and(|(a, b)| a.distance(b) > DRAG_DISTANCE);
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.command || modifiers.ctrl;
-        egui::ScrollArea::vertical()
+        let pitch = row_height + ui.spacing().item_spacing.y;
+        // A scroll offset that the rubber band asked for in the last frame.
+        let scroll_id = ui.id().with("files-band-scroll");
+        let scroll_to = ui.data_mut(|d| d.remove_temp::<f32>(scroll_id));
+        // Screen y of the top of row 0, from the first drawn row.
+        let mut content_top = None;
+        // Column widths stay in egui memory for the session.
+        let mut table = TableBuilder::new(ui)
             .id_salt("files")
+            .resizable(true)
+            .sense(Sense::click_and_drag())
             .auto_shrink(false)
-            .show_rows(ui, row_height, children.len(), |ui, range| {
-                let pitch = row_height + ui.spacing().item_spacing.y;
-                // Screen y of the top of row 0, from the first drawn row.
-                let mut content_top = None;
-                for index in range {
-                    let path = &children[index];
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .column(Column::initial(name_width).at_least(120.0).clip(true))
+            .column(Column::initial(SIZE_WIDTH).at_least(50.0).clip(true))
+            .column(Column::remainder().at_least(80.0).clip(true));
+        if let Some(y) = scroll_to {
+            table = table.vertical_scroll_offset(y);
+        }
+        let (sort_key, descending) = self.sort;
+        let output = table
+            .header(row_height, |mut header| {
+                for (label, key) in [
+                    ("Name", SortKey::Name),
+                    ("Size", SortKey::Size),
+                    ("Modified", SortKey::Time),
+                ] {
+                    header.col(|ui| {
+                        let arrow = match (key == sort_key, descending) {
+                            (false, _) => "",
+                            (true, false) => " ▲",
+                            (true, true) => " ▼",
+                        };
+                        let text = RichText::new(format!("{label}{arrow}")).strong();
+                        if ui
+                            .add(Button::new(text).frame(false))
+                            .on_hover_text("Sort by this column; click again to reverse")
+                            .clicked()
+                        {
+                            actions.push(Action::SortBy(key));
+                        }
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(row_height, rows.len(), |mut row| {
+                    let index = row.index();
+                    let path = &rows[index];
                     let Some(e) = tree.entry(path) else {
-                        continue;
+                        return;
                     };
-                    let (rect, r) = ui.allocate_exact_size(
-                        egui::vec2(width, row_height),
-                        Sense::click_and_drag(),
-                    );
-                    content_top.get_or_insert(rect.top() - index as f32 * pitch);
                     let selected = self.rows.contains(path);
+                    row.set_selected(selected);
+                    let name = if e.is_folder {
+                        format!("{}/", e.name)
+                    } else {
+                        e.name.clone()
+                    };
+                    row.col(|ui| {
+                        ui.add(Label::new(name).truncate().selectable(false));
+                    });
+                    row.col(|ui| {
+                        let size = match (e.is_folder, e.size) {
+                            (false, Some(s)) => human_size(s),
+                            _ => String::new(),
+                        };
+                        ui.add(Label::new(size).selectable(false));
+                    });
+                    row.col(|ui| {
+                        let date = e.modified.map(short_time).unwrap_or_default();
+                        ui.add(Label::new(date).truncate().selectable(false));
+                    });
+                    let r = row.response();
+                    content_top.get_or_insert(r.rect.top() - index as f32 * pitch);
                     // A drag from a selected row drags the selection to
                     // Explorer; from another row it starts a rubber band.
                     if r.drag_started() && !selected {
@@ -1110,37 +1175,6 @@ impl App {
                     if r.dragged() && selected && moved && self.band.is_none() {
                         actions.push(Action::DragOut(targets.clone()));
                     }
-                    if selected {
-                        ui.painter()
-                            .rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
-                    } else if r.hovered() {
-                        ui.painter().rect_filled(
-                            rect,
-                            2.0,
-                            ui.visuals().widgets.hovered.weak_bg_fill,
-                        );
-                    }
-                    ui.scope_builder(
-                        UiBuilder::new()
-                            .max_rect(rect)
-                            .layout(Layout::left_to_right(Align::Center)),
-                        |ui| {
-                            let name = if e.is_folder {
-                                format!("{}/", e.name)
-                            } else {
-                                e.name.clone()
-                            };
-                            column(ui, name_width, row_height, name);
-                            let size = match (e.is_folder, e.size) {
-                                (true, _) => String::new(),
-                                (false, Some(s)) => human_size(s),
-                                (false, None) => "?".into(),
-                            };
-                            column(ui, SIZE_WIDTH, row_height, size);
-                            let date = e.modified.map(|t| t.to_string()).unwrap_or_default();
-                            column(ui, DATE_WIDTH, row_height, date);
-                        },
-                    );
                     if r.clicked() {
                         actions.push(Action::Click {
                             index,
@@ -1167,23 +1201,28 @@ impl App {
                             self.file_menu(ui, path, &menu_targets, actions);
                         }
                     });
-                }
-                let content_top = content_top.unwrap_or_else(|| ui.max_rect().top());
-                if let Some(p) = band_start {
-                    actions.push(Action::BandStart {
-                        x: p.x,
-                        y: p.y - content_top,
-                        add: ctrl,
-                    });
-                }
-                if let Some(band) = self.band.filter(|_| primary_down)
-                    && let Some(p) = ui.input(|i| i.pointer.interact_pos())
-                {
-                    self.draw_band(ui, band, p, content_top);
-                    let rows = band_rows(band.y, p.y - content_top, pitch, children.len());
-                    actions.push(Action::BandUpdate(rows));
-                }
+                });
             });
+        let view = output.inner_rect;
+        let content_top = content_top.unwrap_or(view.top() - output.state.offset.y);
+        if let Some(p) = band_start {
+            actions.push(Action::BandStart {
+                x: p.x,
+                y: p.y - content_top,
+                add: ctrl,
+            });
+        }
+        if let Some(band) = self.band.filter(|_| primary_down)
+            && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let step = draw_band(ui, band, p, content_top, view);
+            if step != 0.0 {
+                let y = (output.state.offset.y - step).max(0.0);
+                ui.data_mut(|d| d.insert_temp(scroll_id, y));
+            }
+            let rows = band_rows(band.y, p.y - content_top, pitch, rows.len());
+            actions.push(Action::BandUpdate(rows));
+        }
     }
 
     /// Back, Forward, Up and the clickable path, with their shortcuts.
@@ -1239,32 +1278,6 @@ impl App {
                 }
             }
         });
-    }
-
-    /// Paint the rubber band and scroll when the pointer is past an edge.
-    fn draw_band(&self, ui: &mut egui::Ui, band: Band, pointer: egui::Pos2, content_top: f32) {
-        let rect = egui::Rect::from_two_pos(egui::pos2(band.x, band.y + content_top), pointer);
-        let color = ui.visuals().selection.bg_fill;
-        ui.painter()
-            .rect_filled(rect, 0.0, color.gamma_multiply(0.25));
-        ui.painter().rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, color),
-            egui::StrokeKind::Inside,
-        );
-        let clip = ui.clip_rect();
-        let step = if pointer.y > clip.bottom() {
-            -(pointer.y - clip.bottom()).min(BAND_SCROLL_MAX)
-        } else if pointer.y < clip.top() {
-            (clip.top() - pointer.y).min(BAND_SCROLL_MAX)
-        } else {
-            0.0
-        };
-        if step != 0.0 {
-            ui.scroll_with_delta(egui::vec2(0.0, step));
-        }
-        ui.ctx().request_repaint();
     }
 
     fn properties_window(&mut self, ctx: &egui::Context) {
@@ -1453,6 +1466,41 @@ impl eframe::App for App {
     }
 }
 
+/// Paint the rubber band over the list. Returns the scroll step when the
+/// pointer is past the top or bottom of `view`.
+fn draw_band(
+    ui: &egui::Ui,
+    band: Band,
+    pointer: egui::Pos2,
+    content_top: f32,
+    view: egui::Rect,
+) -> f32 {
+    let rect = egui::Rect::from_two_pos(egui::pos2(band.x, band.y + content_top), pointer);
+    let color = ui.visuals().selection.bg_fill;
+    let painter = ui.painter().with_clip_rect(view);
+    painter.rect_filled(rect, 0.0, color.gamma_multiply(0.25));
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, color),
+        egui::StrokeKind::Inside,
+    );
+    ui.ctx().request_repaint();
+    if pointer.y > view.bottom() {
+        -(pointer.y - view.bottom()).min(BAND_SCROLL_MAX)
+    } else if pointer.y < view.top() {
+        (view.top() - pointer.y).min(BAND_SCROLL_MAX)
+    } else {
+        0.0
+    }
+}
+
+/// `YYYY-MM-DD HH:MM` of a device time.
+fn short_time(t: LocalTime) -> String {
+    let (y, mo, d, h, mi, _) = t.civil();
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+}
+
 /// The id of a folder's open state in the tree. It depends only on the path,
 /// so "Expand all" can set it for folders that are not drawn.
 fn tree_id(path: &str) -> egui::Id {
@@ -1472,14 +1520,6 @@ fn check_box(ui: &mut egui::Ui, check: Check, path: &str, actions: &mut Vec<Acti
     if r.clicked() {
         actions.push(Action::Toggle(path.to_owned()));
     }
-}
-
-fn column(ui: &mut egui::Ui, width: f32, height: f32, text: impl Into<egui::WidgetText>) {
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, height),
-        Layout::left_to_right(Align::Center),
-        |ui| ui.add(Label::new(text).truncate().selectable(false)),
-    );
 }
 
 /// Folders first, then names without case.

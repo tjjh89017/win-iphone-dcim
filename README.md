@@ -218,8 +218,14 @@ The window:
   folder and file has a checkbox. Checking a folder checks everything below
   it, also the parts that are not listed yet. A folder with only some checked
   items shows a partial mark.
-- Right: the files of the selected folder with name, size and modified date.
-  Click selects a row. Ctrl-click adds or removes a row. Shift-click selects a
+- Right: the files of the selected folder in a table with the columns Name,
+  Size and Modified (`YYYY-MM-DD HH:MM`, device time). Drag a column border
+  to resize it; the widths stay while the window is open. Click a column
+  header to sort by it, click again to reverse; ▲ or ▼ marks the sort
+  column. The default is Name ascending. Name sorts folders and files
+  together, like `ls`. Size and Modified put folders first (by name), then
+  the files by size or date; files without a size or date go last. A folder
+  has no size. Click selects a row. Ctrl-click adds or removes a row. Shift-click selects a
   range. Double-click opens a file, or opens a folder. Press the left button
   on empty space or on a row that is not selected, then drag: a selection
   rectangle selects every row it touches (rubber band). With Ctrl held when

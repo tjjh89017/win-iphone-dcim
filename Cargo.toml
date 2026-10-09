@@ -40,6 +40,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 [target.'cfg(windows)'.dependencies]
 # GUI toolkit. The glow (OpenGL) renderer keeps the ARM64 build simple.
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+# Table with resizable columns for the file list.
+egui_extras = { version = "0.36.2", default-features = false }
 rfd = "0.17.2"
 # `#[implement]` of the windows crate expands to paths in windows-core.
 windows-core = "0.62.2"

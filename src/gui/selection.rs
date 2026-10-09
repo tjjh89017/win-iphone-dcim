@@ -6,9 +6,11 @@
 //! checked. `Selection` is a snapshot of the marks for the copy.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
+use crate::cmd::sort::{SortKey, desc_none_last, name_order};
 use crate::device_fs::DeviceFs;
 use crate::error::Result;
 use crate::model::{LocalTime, Node, ObjectId, join_device_path};
@@ -302,6 +304,37 @@ impl Selection {
     }
 }
 
+/// Sort the rows of the file list like the Details view of File Explorer.
+///
+/// `Name` mixes folders and files in the `ls` name order. `Size` and
+/// `Time` put folders first, in name order whatever the direction, then
+/// the files by the key; files without the value go last in both
+/// directions. Descending is the `ls --sort` order (largest or newest
+/// first); `descending` flips only the files and, for `Name`, everything.
+pub fn sort_rows(entries: &mut [&Entry], key: SortKey, descending: bool) {
+    fn by_value<T: Ord + Copy>(a: Option<T>, b: Option<T>, descending: bool) -> Ordering {
+        if descending {
+            desc_none_last(&a, &b)
+        } else {
+            a.is_none().cmp(&b.is_none()).then(a.cmp(&b))
+        }
+    }
+    entries.sort_by(|a, b| match key {
+        SortKey::Name | SortKey::None => {
+            let o = name_order(&a.name, &b.name);
+            if descending { o.reverse() } else { o }
+        }
+        SortKey::Size | SortKey::Time => b.is_folder.cmp(&a.is_folder).then_with(|| {
+            let value = match (a.is_folder, key) {
+                (true, _) => Ordering::Equal,
+                (false, SortKey::Size) => by_value(a.size, b.size, descending),
+                (false, _) => by_value(a.modified, b.modified, descending),
+            };
+            value.then_with(|| name_order(&a.name, &b.name))
+        }),
+    });
+}
+
 /// The highlighted rows of the file list. This is not the check marks:
 /// Open and "Copy to..." act on it. Ctrl-click toggles one row,
 /// Shift-click selects a range from the anchor row.
@@ -501,6 +534,75 @@ mod tests {
     const A2: &str = "/Internal Storage/DCIM/202601_a/IMG_0002.MOV";
     const B: &str = "/Internal Storage/DCIM/202601_b";
     const B1: &str = "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC";
+
+    fn row(name: &str, folder: bool, size: Option<u64>, modified: Option<i64>) -> Entry {
+        Entry {
+            path: format!("/{name}"),
+            name: name.into(),
+            is_folder: folder,
+            size,
+            modified: modified.map(LocalTime),
+            created: None,
+            content_type: None,
+        }
+    }
+
+    fn sorted(rows: &[Entry], key: SortKey, descending: bool) -> Vec<&str> {
+        let mut v: Vec<&Entry> = rows.iter().collect();
+        sort_rows(&mut v, key, descending);
+        v.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn sample() -> Vec<Entry> {
+        vec![
+            row("b.mov", false, Some(30), Some(3)),
+            row("Zeta", true, None, None),
+            row("a.heic", false, Some(10), Some(1)),
+            row("nosize.jpg", false, None, None),
+            row("alpha", true, Some(99), Some(9)),
+            row("c.png", false, Some(20), Some(2)),
+        ]
+    }
+
+    #[test]
+    fn name_sort_mixes_folders_and_files_like_ls() {
+        let rows = sample();
+        assert_eq!(
+            sorted(&rows, SortKey::Name, false),
+            ["a.heic", "alpha", "b.mov", "c.png", "nosize.jpg", "Zeta"]
+        );
+        assert_eq!(
+            sorted(&rows, SortKey::Name, true),
+            ["Zeta", "nosize.jpg", "c.png", "b.mov", "alpha", "a.heic"]
+        );
+    }
+
+    #[test]
+    fn size_sort_puts_folders_first_and_missing_last() {
+        let rows = sample();
+        assert_eq!(
+            sorted(&rows, SortKey::Size, false),
+            ["alpha", "Zeta", "a.heic", "c.png", "b.mov", "nosize.jpg"]
+        );
+        // Descending flips only the files; the folders keep the name order.
+        assert_eq!(
+            sorted(&rows, SortKey::Size, true),
+            ["alpha", "Zeta", "b.mov", "c.png", "a.heic", "nosize.jpg"]
+        );
+    }
+
+    #[test]
+    fn time_sort_puts_folders_first_and_missing_last() {
+        let rows = sample();
+        assert_eq!(
+            sorted(&rows, SortKey::Time, false),
+            ["alpha", "Zeta", "a.heic", "c.png", "b.mov", "nosize.jpg"]
+        );
+        assert_eq!(
+            sorted(&rows, SortKey::Time, true),
+            ["alpha", "Zeta", "b.mov", "c.png", "a.heic", "nosize.jpg"]
+        );
+    }
 
     /// Load the whole fake device into a tree, as the GUI does on expand.
     fn loaded(fs: &dyn DeviceFs) -> Tree {

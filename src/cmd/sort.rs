@@ -18,14 +18,19 @@ pub enum SortKey {
 }
 
 fn by_name(a: &Entry, b: &Entry) -> Ordering {
-    let (x, y) = (a.display_name(), b.display_name());
-    x.to_lowercase()
-        .cmp(&y.to_lowercase())
-        .then_with(|| x.cmp(&y))
+    name_order(&a.display_name(), &b.display_name())
 }
 
-/// Larger value first, `None` last.
-fn desc_none_last<T: Ord>(a: &Option<T>, b: &Option<T>) -> Ordering {
+/// The name order: case-insensitive first, then case-sensitive. The GUI
+/// file list uses it too.
+pub fn name_order(x: &str, y: &str) -> Ordering {
+    x.to_lowercase()
+        .cmp(&y.to_lowercase())
+        .then_with(|| x.cmp(y))
+}
+
+/// Larger value first, `None` last: the `Size` and `Time` order.
+pub fn desc_none_last<T: Ord>(a: &Option<T>, b: &Option<T>) -> Ordering {
     match (a, b) {
         (Some(x), Some(y)) => y.cmp(x),
         (Some(_), None) => Ordering::Less,

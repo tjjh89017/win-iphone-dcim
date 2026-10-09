@@ -38,11 +38,12 @@ A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an i
 
 - The UI thread never touches a `DeviceFs`. The device thread in `gui/device.rs` owns it and answers requests over channels.
 - The UI thread never waits for the device thread. It reads replies with `try_recv`.
-- `gui/app.rs` and `gui/shell.rs` are Windows only (`#[cfg(windows)]`). eframe and rfd are Windows-only dependencies.
+- `gui/app.rs` and `gui/shell.rs` are Windows only (`#[cfg(windows)]`). eframe, egui_extras and rfd are Windows-only dependencies.
 - Test the GUI logic (selection, cache paths, device thread) on Linux with the fake device. egui drawing has no unit tests.
 - The GUI starts `win-iphone-dcim.exe` from its own folder as the worker.
 - The GUI UI thread is an OLE STA apartment (`OleInitialize`). The OLE clipboard, `DoDragDrop` and the `IDataObject` live on it. Never call `CoInitializeEx` with MTA on the UI thread.
 - The device thread never touches OLE or COM. Paste streams (`IStream`) live in the process MTA and get their bytes from the device thread through the bounded channel in `gui/chunks`.
+- The file list sorts with `gui/selection::sort_rows`, which reuses the `cmd/sort` name and value order.
 - `gui/filedesc` and `gui/chunks` are portable and have unit tests. `gui/dataobject` and `gui/dnd` are Windows only and are checked by xwin clippy; test the Explorer interaction by hand on Windows.
 
 ## Code
