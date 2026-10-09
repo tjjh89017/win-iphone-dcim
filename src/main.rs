@@ -27,6 +27,7 @@ use crate::cmd::{
     cp::{CpOptions, OnExists},
     ls::LsOptions,
     sort::SortKey,
+    verify::VerifyOptions,
 };
 use crate::devpath::DevicePath;
 use crate::error::{Error, exit};
@@ -148,6 +149,9 @@ fn run(cli: &Cli) -> Result<usize, Error> {
                 diagnostic: cli.diagnostic,
             };
             cmd::cp::run(fs.as_ref(), sources, dest, opts, &mut out)?
+        }
+        Command::Verify { hash, dest } => {
+            cmd::verify::run(dest, VerifyOptions { hash: *hash }, &mut out)?
         }
     };
     out.flush().map_err(error::stdout_err)?;

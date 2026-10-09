@@ -159,6 +159,21 @@ pub enum Command {
         #[arg(value_name = "DEST", required = true)]
         dest: PathBuf,
     },
+
+    /// Check the files in DEST against DEST/.win-iphone-dcim/manifest.jsonl.
+    ///
+    /// Each record is checked for a file with the recorded size. Files
+    /// without a record are listed as unrecorded. Exit code 0 if all files
+    /// are ok, 1 otherwise.
+    Verify {
+        /// Also recompute the BLAKE3 hash where the manifest has one.
+        #[arg(long)]
+        hash: bool,
+
+        /// The copy root that holds `.win-iphone-dcim/manifest.jsonl`.
+        #[arg(value_name = "DEST")]
+        dest: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -341,6 +356,17 @@ mod tests {
         assert_eq!(cli.retries, 3);
         assert!(!cli.diagnostic);
         assert!(parse(&["--retries", "-1", "devices"]).is_err());
+    }
+
+    #[test]
+    fn verify_command() {
+        let cli = parse(&["verify", "--hash", "D:\\Backup"]).unwrap();
+        let Command::Verify { hash, dest } = cli.command else {
+            panic!("not verify");
+        };
+        assert!(hash);
+        assert_eq!(dest, PathBuf::from("D:\\Backup"));
+        assert!(parse(&["verify"]).is_err());
     }
 
     #[test]

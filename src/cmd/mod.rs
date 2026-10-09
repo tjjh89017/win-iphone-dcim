@@ -4,6 +4,7 @@ pub mod cp;
 pub mod ls;
 pub mod sort;
 pub mod tree;
+pub mod verify;
 
 use std::io::Write;
 
