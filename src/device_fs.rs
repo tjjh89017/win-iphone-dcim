@@ -54,6 +54,8 @@ pub mod fake {
 
     pub struct FakeFs {
         nodes: Vec<(Node, Option<usize>, Vec<u8>)>,
+        /// (node index, bytes before the error, fatal).
+        failures: Vec<(usize, usize, bool)>,
     }
 
     impl FakeFs {
@@ -67,10 +69,12 @@ pub mod fake {
                 size: None,
                 content_type: None,
                 modified: None,
+                created: None,
                 raw_file_name: None,
             };
             Self {
                 nodes: vec![(root, None, Vec::new())],
+                failures: Vec::new(),
             }
         }
 
@@ -84,6 +88,7 @@ pub mod fake {
                 size: data.map(|d| d.len() as u64),
                 content_type: None,
                 modified: None,
+                created: None,
                 raw_file_name: Some(name.encode_utf16().collect()),
             };
             self.nodes
@@ -102,6 +107,12 @@ pub mod fake {
         /// Change a node after creation, for example to fake a wrong size.
         pub fn node_mut(&mut self, index: usize) -> &mut Node {
             &mut self.nodes[index].0
+        }
+
+        /// Make `read_to` of node `index` fail after `after` bytes. A fatal
+        /// failure looks like a disconnected device.
+        pub fn fail_read(&mut self, index: usize, after: usize, fatal: bool) {
+            self.failures.push((index, after, fatal));
         }
 
         fn index_of(&self, node: &Node) -> usize {
@@ -128,7 +139,22 @@ pub mod fake {
         }
 
         fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64> {
-            let data = &self.nodes[self.index_of(file)].2;
+            let index = self.index_of(file);
+            let data = &self.nodes[index].2;
+            if let Some(&(_, after, fatal)) = self.failures.iter().find(|f| f.0 == index) {
+                let n = after.min(data.len());
+                out.write_all(&data[..n]).map_err(|source| Error::Io {
+                    context: "write".into(),
+                    source,
+                })?;
+                let code = if fatal { 0x8007_048F } else { 0x8000_4005 };
+                return Err(Error::from_hresult(
+                    format!("fake read after {n} bytes"),
+                    code,
+                    "simulated failure".into(),
+                    false,
+                ));
+            }
             out.write_all(data).map_err(|source| Error::Io {
                 context: "write".into(),
                 source,
