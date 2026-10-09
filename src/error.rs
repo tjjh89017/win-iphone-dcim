@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::model::FailureKind;
+
 /// Exit codes per SPEC.md section 5.
 pub mod exit {
     pub const OK: i32 = 0;
@@ -91,14 +93,28 @@ pub enum Error {
     #[error("{0}: not a folder")]
     NotAFolder(String),
 
-    #[error("{0}: is a folder; -r is not implemented yet")]
+    #[error("{0}: is a folder; use -r to copy folders")]
     FolderNeedsRecursive(String),
 
     #[error("destination must be an existing folder when there are two or more sources: {}", .0.display())]
     DestNotFolder(PathBuf),
 
-    #[error("unsafe file name from the device: {0:?}")]
-    UnsafeFileName(String),
+    #[error("unsafe file name from the device: {name:?} ({reason})")]
+    UnsafeFileName { name: String, reason: &'static str },
+
+    #[error(
+        "{path}: name differs only by case from {other:?} in the same folder; neither is copied"
+    )]
+    NameCollision { path: String, other: String },
+
+    #[error("{}: exists and is not a folder", .0.display())]
+    NotAFolderLocal(PathBuf),
+
+    #[error("{}: a folder is at the target file path", .0.display())]
+    TargetIsFolder(PathBuf),
+
+    #[error("{0} is not implemented until Phase 2")]
+    NotImplemented(&'static str),
 
     #[error("device file name is not valid UTF-16 (units: {units}); refusing to copy it")]
     InvalidDeviceName { units: String },
@@ -161,11 +177,16 @@ impl Error {
             | Self::AccessDenied { .. }
             | Self::DeviceUnavailable { .. }
             | Self::DeviceOpen { .. } => exit::DEVICE,
-            Self::DeviceAmbiguous { .. } | Self::DestNotFolder(_) => exit::CLI,
+            Self::DeviceAmbiguous { .. } | Self::DestNotFolder(_) | Self::NotImplemented(_) => {
+                exit::CLI
+            }
             Self::PathNotFound { .. }
             | Self::NotAFolder(_)
             | Self::FolderNeedsRecursive(_)
-            | Self::UnsafeFileName(_)
+            | Self::UnsafeFileName { .. }
+            | Self::NameCollision { .. }
+            | Self::NotAFolderLocal(_)
+            | Self::TargetIsFolder(_)
             | Self::InvalidDeviceName { .. }
             | Self::OutputExists(_)
             | Self::Io { .. }
@@ -182,6 +203,22 @@ impl Error {
             self,
             Self::AccessDenied { .. } | Self::DeviceUnavailable { .. } | Self::UnsupportedPlatform
         )
+    }
+
+    /// Category for the `cp` error summary.
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            Self::PathNotFound { .. } => FailureKind::NotFound,
+            Self::NotAFolder(_) | Self::FolderNeedsRecursive(_) => FailureKind::Usage,
+            Self::UnsafeFileName { .. } | Self::InvalidDeviceName { .. } => FailureKind::NameUnsafe,
+            Self::NameCollision { .. } => FailureKind::Collision,
+            Self::SizeMismatch { .. } => FailureKind::SizeMismatch,
+            Self::OutputExists(_) | Self::NotAFolderLocal(_) | Self::TargetIsFolder(_) => {
+                FailureKind::TargetExists
+            }
+            Self::Io { .. } => FailureKind::Io,
+            _ => FailureKind::Device,
+        }
     }
 
     /// True if this is a failed write to a closed pipe, for example `| head`.
@@ -264,6 +301,27 @@ mod tests {
         ));
         assert_eq!(err.exit_code(), exit::DEVICE);
         assert_eq!(Error::DeviceAmbiguous { count: 2 }.exit_code(), exit::CLI);
+    }
+
+    #[test]
+    fn failure_kinds() {
+        assert_eq!(
+            Error::NameCollision {
+                path: "/a".into(),
+                other: "A".into()
+            }
+            .kind(),
+            FailureKind::Collision
+        );
+        assert_eq!(
+            Error::FolderNeedsRecursive("/a".into()).kind(),
+            FailureKind::Usage
+        );
+        assert_eq!(Error::NotImplemented("--verify").exit_code(), exit::CLI);
+        assert_eq!(
+            Error::from_hresult("read", 0x8007_048F, String::new(), false).kind(),
+            FailureKind::Device
+        );
     }
 
     #[test]

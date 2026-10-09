@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub use crate::backup::paths::safe_file_name;
 use crate::error::{Error, Result};
 
 const BACKSLASH: u16 = b'\\' as u16;
@@ -97,18 +98,6 @@ pub fn device_name_to_os(units: &[u16]) -> Result<OsString> {
     }
 }
 
-/// Reject names that could leave the destination folder. Full Windows name
-/// rules (reserved names, case collisions) come in Phase 1.
-pub fn safe_file_name(name: &str) -> Result<&str> {
-    let bad =
-        name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':', '\0']);
-    if bad {
-        Err(Error::UnsafeFileName(name.to_owned()))
-    } else {
-        Ok(name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +172,7 @@ mod tests {
 
     #[test]
     fn unsafe_names_are_rejected() {
-        for bad in ["", ".", "..", "a/b", "a\\b", "C:x"] {
+        for bad in ["", ".", "..", "a/b", "a\\b", "C:x", "CON", "a?b", "end."] {
             assert!(safe_file_name(bad).is_err(), "{bad:?}");
             let units: Vec<u16> = bad.encode_utf16().collect();
             assert!(device_name_to_os(&units).is_err(), "{bad:?}");
