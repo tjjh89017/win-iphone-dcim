@@ -9,10 +9,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 
 use super::cache;
+use super::chunks::{self, Chunk, ChunkWriter, Pending};
+use super::filedesc::{self, FileItem, Listing};
 use super::selection::{Entry, SelectedFs, Selection};
 use crate::backup::engine::{self, CopyOptions, CopySummary, Note, OnExists, ProgressSink};
 use crate::backup::manifest::device_key;
@@ -20,7 +22,7 @@ use crate::backup::transfer::transfer;
 use crate::device_fs::{self, DeviceFs};
 use crate::devpath::DevicePath;
 use crate::error::{Error, Result};
-use crate::model::{DeviceInfo, Node};
+use crate::model::{DeviceInfo, Node, join_device_path};
 use crate::paths::to_verbatim;
 use crate::supervisor::{self, WorkerCommand};
 
@@ -70,7 +72,25 @@ pub enum Request {
     },
     /// Delete the cache folder of the open device.
     ClearCache,
+    /// Walk `paths` and their folders for an Explorer paste. The listing
+    /// goes into `slot`, because the UI thread may be inside a drag loop
+    /// and read no replies.
+    Enumerate {
+        paths: Vec<String>,
+        slot: Arc<Pending<ListingResult>>,
+    },
+    /// Read a file into a chunk channel for an Explorer paste stream.
+    OpenRead {
+        path: String,
+        /// 1-based number of the file in its paste, and the file count.
+        number: usize,
+        files: usize,
+        tx: SyncSender<Chunk>,
+    },
 }
+
+/// The listing of a paste, or why the walk failed.
+pub type ListingResult = std::result::Result<Arc<Listing>, String>;
 
 /// What a copy copies.
 pub enum CopySet {
@@ -139,6 +159,22 @@ pub enum Reply {
         local: PathBuf,
         result: std::result::Result<(), String>,
     },
+    /// A line for the log about an Explorer paste.
+    PasteNote(String),
+    /// Explorer reads file `number` of `files`.
+    PasteProgress {
+        number: usize,
+        files: usize,
+        path: String,
+        bytes: u64,
+    },
+    /// A paste stream ended: the bytes read, or the error.
+    PasteFileDone {
+        number: usize,
+        files: usize,
+        path: String,
+        result: std::result::Result<u64, String>,
+    },
 }
 
 /// The UI side of the device thread.
@@ -193,6 +229,12 @@ impl DeviceHandle {
             reply_tx,
             cancel,
         }
+    }
+
+    /// A sender for requests from other threads, for example the paste
+    /// streams that Explorer reads.
+    pub fn sender(&self) -> Sender<Request> {
+        self.tx.clone()
     }
 
     pub fn send(&self, request: Request) {
@@ -274,7 +316,93 @@ impl DeviceThread {
                     .map_err(text);
                 self.out.send(Reply::CacheCleared(result));
             }
+            Request::Enumerate { paths, slot } => {
+                let result = self.enumerate(&paths).map_err(text).map(|items| {
+                    let listing = Listing::new(&items, filedesc::device_filetime);
+                    for skip in &listing.skipped {
+                        tracing::warn!("paste: {skip}");
+                        self.out.send(Reply::PasteNote(format!("[skip] {skip}")));
+                    }
+                    Arc::new(listing)
+                });
+                slot.set(result);
+                (self.out.wake)();
+            }
+            Request::OpenRead {
+                path,
+                number,
+                files,
+                tx,
+            } => {
+                let result = self.read_chunks(&path, number, files, &tx).map_err(text);
+                if let Err(e) = &result {
+                    tracing::warn!("paste: {path}: {e}");
+                    chunks::send_error(&tx, e.clone());
+                }
+                self.out.send(Reply::PasteFileDone {
+                    number,
+                    files,
+                    path,
+                    result,
+                });
+            }
         }
+    }
+
+    /// Every object at and below `paths`, folders before their contents.
+    /// Relative paths start at the common parent of `paths`.
+    fn enumerate(&mut self, paths: &[String]) -> Result<Vec<FileItem>> {
+        let base = filedesc::common_parent(paths);
+        let mut items = Vec::new();
+        let mut found = Vec::new();
+        for path in paths {
+            let node = self.node(path)?;
+            let rel = filedesc::relative(&base, path).ok_or_else(|| Error::PathNotFound {
+                path: path.clone(),
+                component: path.clone(),
+            })?;
+            walk(self.fs()?, &node, path.clone(), rel, &mut items, &mut found)?;
+        }
+        // The streams resolve these paths again; keep the nodes.
+        for (path, node) in found {
+            self.nodes.entry(path).or_insert(node);
+        }
+        Ok(items)
+    }
+
+    /// Stream `path` into `tx` and end it with `Chunk::End`.
+    fn read_chunks(
+        &self,
+        path: &str,
+        number: usize,
+        files: usize,
+        tx: &SyncSender<Chunk>,
+    ) -> Result<u64> {
+        let node = self.node(path)?;
+        if node.is_folder {
+            return Err(Error::NotAFolder(path.to_owned()));
+        }
+        let mut bytes = 0;
+        let mut last = Instant::now();
+        let out = &self.out;
+        let mut writer = ChunkWriter::new(tx.clone(), |n| {
+            bytes += n;
+            if last.elapsed() >= PROGRESS_INTERVAL {
+                last = Instant::now();
+                out.send(Reply::PasteProgress {
+                    number,
+                    files,
+                    path: path.to_owned(),
+                    bytes,
+                });
+            }
+        });
+        let n = self.fs()?.read_to(&node, &mut writer)?;
+        writer.finish().map_err(|source| Error::Io {
+            context: format!("send {path} to File Explorer"),
+            source,
+        })?;
+        Ok(n)
     }
 
     fn open(&mut self, index: usize) -> Result<Opened> {
@@ -397,6 +525,41 @@ impl DeviceThread {
         })?;
         Ok((local, false))
     }
+}
+
+/// Push `node` at `path` and, for a folder, everything below it.
+fn walk(
+    fs: &dyn DeviceFs,
+    node: &Node,
+    path: String,
+    rel: String,
+    items: &mut Vec<FileItem>,
+    found: &mut Vec<(String, Node)>,
+) -> Result<()> {
+    items.push(FileItem {
+        path: path.clone(),
+        rel: rel.clone(),
+        is_folder: node.is_folder,
+        size: node.size,
+        modified: node.modified,
+        created: node.created,
+    });
+    if node.is_folder {
+        for child in fs.list(node)? {
+            let name = child.display_name();
+            let child_path = join_device_path(&path, &name);
+            walk(
+                fs,
+                &child,
+                child_path.clone(),
+                format!("{rel}\\{name}"),
+                items,
+                found,
+            )?;
+            found.push((child_path, child));
+        }
+    }
+    Ok(())
 }
 
 /// Engine progress as replies, at most one progress reply per interval.
@@ -717,6 +880,72 @@ mod tests {
             path: "/Internal Storage/DCIM".into(),
         });
         assert!(matches!(next(&h), Reply::DownloadFailed { .. }));
+    }
+
+    #[test]
+    fn enumerate_and_stream_for_explorer() {
+        let cache = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        open(&h);
+        let slot = Arc::new(Pending::default());
+        h.send(Request::Enumerate {
+            paths: vec![
+                "/Internal Storage/DCIM/202601_a".into(),
+                "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC".into(),
+            ],
+            slot: slot.clone(),
+        });
+        let listing = slot.wait(Duration::from_secs(10)).unwrap().unwrap();
+        let names: Vec<(String, bool)> = (0..listing.len())
+            .map(|i| match listing.file(i as i32) {
+                Some(f) => (f.path.clone(), true),
+                None => (String::new(), false),
+            })
+            .collect();
+        assert_eq!(listing.files, 3);
+        assert_eq!(names[0], (String::new(), false));
+        assert_eq!(
+            names[1..],
+            [
+                ("/Internal Storage/DCIM/202601_a/IMG_0001.HEIC".into(), true),
+                ("/Internal Storage/DCIM/202601_a/IMG_0002.MOV".into(), true),
+                ("/Internal Storage/DCIM/202601_b/IMG_0001.HEIC".into(), true),
+            ]
+        );
+        let mov = listing.file(2).unwrap();
+        assert_eq!((mov.number, mov.size), (2, Some(2048)));
+
+        let (tx, rx) = chunks::channel();
+        h.send(Request::OpenRead {
+            path: mov.path.clone(),
+            number: mov.number,
+            files: listing.files,
+            tx,
+        });
+        let mut reader = chunks::ChunkReader::new(rx);
+        let mut buf = vec![0; 4096];
+        assert_eq!(reader.read(&mut buf).unwrap(), 2048);
+        assert!(reader.is_done());
+        let done = until(&h, |r| matches!(r, Reply::PasteFileDone { .. }));
+        assert!(matches!(
+            done.last(),
+            Some(Reply::PasteFileDone {
+                number: 2,
+                files: 3,
+                result: Ok(2048),
+                ..
+            })
+        ));
+
+        // A folder has no stream.
+        let (tx, rx) = chunks::channel();
+        h.send(Request::OpenRead {
+            path: "/Internal Storage/DCIM".into(),
+            number: 1,
+            files: 1,
+            tx,
+        });
+        assert!(chunks::ChunkReader::new(rx).read(&mut buf).is_err());
     }
 
     #[test]

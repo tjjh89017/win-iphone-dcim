@@ -7,7 +7,9 @@
 //! over channels.
 
 pub mod cache;
+pub mod chunks;
 pub mod device;
+pub mod filedesc;
 pub mod selection;
 
 #[cfg(windows)]

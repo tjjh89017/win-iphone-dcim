@@ -343,6 +343,8 @@ impl App {
                 Ok(()) => self.status = format!("Opened {}", local.display()),
                 Err(e) => self.error(format!("Cannot open {}: {e}", local.display())),
             },
+            // The Explorer paste replies come with the data object.
+            Reply::PasteNote(_) | Reply::PasteProgress { .. } | Reply::PasteFileDone { .. } => {}
         }
     }
 
