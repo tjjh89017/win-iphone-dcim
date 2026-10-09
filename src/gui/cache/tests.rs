@@ -179,8 +179,7 @@ fn choose_base_prefers_the_exe_folder_and_falls_back() {
     let exe = tmp.path().join("app");
     std::fs::create_dir(&exe).unwrap();
     assert_eq!(choose_base(None, Some(&exe)), Some(exe.join("cache")));
-    assert!(exe.join("cache").is_dir());
-    assert!(!exe.join("cache").join(PROBE_FILE).exists());
+    assert!(!exe.join("cache").exists());
     let configured = tmp.path().join("mine");
     assert_eq!(
         choose_base(Some(&configured), Some(&exe)),
@@ -208,5 +207,41 @@ fn clear_all_removes_every_device_and_ignores_a_missing_folder() {
         std::fs::write(&f, b"abc").unwrap();
     }
     assert_eq!(clear_all(&base), 0);
-    assert!(std::fs::read_dir(&base).unwrap().next().is_none());
+    assert!(!base.exists());
+}
+
+#[test]
+fn clear_all_keeps_the_folders_of_a_file_it_cannot_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("cache");
+    let locked = put(&base, "a/locked.bin", 3, 1);
+    put(&base, "a/free.bin", 3, 1);
+    let left = clear_all_with(&base, &mut |p| {
+        if p == locked {
+            Err(std::io::Error::from(ErrorKind::PermissionDenied))
+        } else {
+            std::fs::remove_file(p)
+        }
+    });
+    assert_eq!(left, 2);
+    assert!(locked.exists());
+    assert!(base.exists());
+}
+
+#[test]
+fn clear_removes_the_empty_base_folder_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("cache");
+    put(&base, "dev/x.bin", 3, 1);
+    clear(&base.join("dev")).unwrap();
+    assert!(!base.exists());
+}
+
+#[test]
+fn choose_base_leaves_no_folder_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wanted = tmp.path().join("cache");
+    let got = choose_base_with(Some(wanted.clone()), || None);
+    assert_eq!(got, Some(wanted.clone()));
+    assert!(!wanted.exists());
 }

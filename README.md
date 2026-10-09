@@ -485,6 +485,11 @@ The GUI keeps no settings and writes nothing to the registry or to
   under `Program Files`), the GUI logs one line and uses
   `%LOCALAPPDATA%\win-iphone-dcim\cache`.
 
+The cache folder exists only while it holds files. "Clear cache" and the
+clear at start and exit delete the folder itself, so a portable install
+leaves no empty `cache` folder next to the exe. A file that a viewer holds
+open keeps its folders.
+
 The cache has a soft size limit of 512 MiB. Before a download, the GUI
 deletes the least recently used cached files until the new file fits. A
 file that a viewer holds open is skipped. The download always proceeds,

@@ -57,13 +57,28 @@ fn choose_base_with(
     }
 }
 
-/// Create `dir` and write and delete a small file in it.
+/// Create `dir` and write and delete a small file in it. A folder that the
+/// probe created is removed again, so an unused cache leaves nothing.
 fn writable(dir: &Path) -> std::io::Result<()> {
     let dir = to_verbatim(dir);
+    let existed = dir.exists();
     std::fs::create_dir_all(&dir)?;
     let probe = dir.join(PROBE_FILE);
     std::fs::write(&probe, b"")?;
-    std::fs::remove_file(&probe)
+    std::fs::remove_file(&probe)?;
+    if !existed {
+        remove_dir_quiet(&dir);
+    }
+    Ok(())
+}
+
+/// Remove `dir` if it is empty. A missing or non-empty folder stays as is.
+fn remove_dir_quiet(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir(dir)
+        && e.kind() != ErrorKind::NotFound
+    {
+        tracing::debug!("cache {}: {e}", dir.display());
+    }
 }
 
 /// The fallback cache base folder from the environment.
@@ -238,21 +253,40 @@ fn remove_empty_parents(file: &Path, base: &Path) {
     }
 }
 
-/// Delete the cache folder of one device. A missing folder is not an error.
+/// Delete the cache folder of one device, and the base folder above it when
+/// that is empty then. A missing folder is not an error.
 pub fn clear(device_dir: &Path) -> Result<()> {
     match std::fs::remove_dir_all(device_dir) {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(Error::Io {
             context: format!("delete the cache folder {}", device_dir.display()),
             source: e,
         }),
-        _ => Ok(()),
+        _ => {
+            if let Some(base) = device_dir.parent() {
+                remove_dir_quiet(base);
+            }
+            Ok(())
+        }
     }
 }
 
-/// Delete everything under `base`, all devices. A file that cannot be
-/// deleted (open in a viewer) is logged at debug level and left. Return the
-/// number of entries left. Never fails.
+/// Delete everything under `base`, all devices, and `base` itself. A file
+/// that cannot be deleted (open in a viewer) is logged at debug level and
+/// left, and so are the folders above it. Return the number of entries left.
+/// Never fails.
 pub fn clear_all(base: &Path) -> usize {
+    clear_all_with(base, &mut |p| std::fs::remove_file(p))
+}
+
+fn clear_all_with(base: &Path, remove: &mut dyn FnMut(&Path) -> std::io::Result<()>) -> usize {
+    let left = clear_contents(base, remove);
+    if left == 0 {
+        remove_dir_quiet(base);
+    }
+    left
+}
+
+fn clear_contents(base: &Path, remove: &mut dyn FnMut(&Path) -> std::io::Result<()>) -> usize {
     let entries = match std::fs::read_dir(base) {
         Ok(entries) => entries,
         Err(e) => {
@@ -267,12 +301,12 @@ pub fn clear_all(base: &Path) -> usize {
         let path = entry.path();
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         if is_dir {
-            left += clear_all(&path);
+            left += clear_contents(&path, remove);
             if let Err(e) = std::fs::remove_dir(&path) {
                 tracing::debug!("cache {}: {e}", path.display());
                 left += 1;
             }
-        } else if let Err(e) = std::fs::remove_file(&path) {
+        } else if let Err(e) = remove(&path) {
             tracing::debug!("cache {}: {e}", path.display());
             left += 1;
         }
