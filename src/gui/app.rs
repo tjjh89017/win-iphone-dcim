@@ -210,6 +210,8 @@ struct App {
     /// Delete the cache of all devices when the window closes.
     clear_cache_on_exit: bool,
     status: String,
+    /// The scan and copy status, on its own line below the top row.
+    copy_status: String,
     log: Vec<String>,
     copying: bool,
     copy: CopyTracker,
@@ -255,6 +257,7 @@ impl App {
             force: false,
             clear_cache_on_exit: true,
             status: String::new(),
+            copy_status: String::new(),
             log: Vec::new(),
             copying: false,
             copy: CopyTracker::new(Instant::now()),
@@ -385,13 +388,13 @@ impl App {
             }
             Reply::CopyProgress(p) => {
                 if self.copy.scanning {
-                    self.status = format!("Copying to {}", self.copy_dest.display());
+                    self.copy_status = format!("Copying to {}", self.copy_dest.display());
                 }
                 self.copy.update(p, Instant::now());
             }
             Reply::CopyScan { files, bytes } => {
                 self.copy.scan(files, bytes);
-                self.status = format!("Scanning... {files} files, {}", human_size(bytes));
+                self.copy_status = format!("Scanning... {files} files, {}", human_size(bytes));
             }
             Reply::CopyNote(note, text) => {
                 // Copied files are in the counts; the log lists the rest.
@@ -405,7 +408,7 @@ impl App {
                 match result {
                     Ok(s) => {
                         self.copy.finish(&s, Instant::now());
-                        self.status = format!(
+                        self.copy_status = format!(
                             "Copy {}: copied {}, skipped {}, failed {}, {}",
                             if s.cancelled { "cancelled" } else { "done" },
                             s.copied,
@@ -415,6 +418,7 @@ impl App {
                         );
                     }
                     Err(e) => {
+                        self.copy_status.clear();
                         self.copy.fail(&e);
                         self.error(format!("Copy failed: {e}"));
                     }
@@ -766,10 +770,10 @@ impl App {
             self.paste_view.clear();
         }
         if totals.is_some() {
-            self.status = format!("Copying to {}", dest.display());
+            self.copy_status = format!("Copying to {}", dest.display());
         } else {
             self.copy.scan(0, 0);
-            self.status = "Scanning...".into();
+            self.copy_status = "Scanning...".into();
         }
         self.push_log(format!("[start] copy to {}", dest.display()));
         self.copy_dest = dest;
@@ -994,7 +998,7 @@ impl App {
                     && let Some(d) = &self.device
                 {
                     d.cancel.store(true, Ordering::SeqCst);
-                    self.status = if self.copy.scanning {
+                    self.copy_status = if self.copy.scanning {
                         "Cancel: the scan stops now".into()
                     } else {
                         "Cancel: the copy stops after the current file".into()
@@ -1032,6 +1036,9 @@ impl App {
                 ui.label("Explorer is reading...");
             }
         });
+        if !self.copy_status.is_empty() {
+            ui.label(&self.copy_status);
+        }
         if self.close_warning {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(
