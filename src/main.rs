@@ -74,7 +74,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
     let mut out = stdout.lock();
     let failures = match &cli.command {
         Command::Devices => {
-            let list = wpd::list_devices()?;
+            let list = device_fs::list_devices(cli.timeout.0, !cli.no_isolate)?;
             cmd::devices(&list, &mut out)?;
             0
         }
@@ -88,7 +88,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             unsorted,
             paths,
         } => {
-            let fs = wpd::open(cli.device)?;
+            let fs = device_fs::open_device_fs(cli.device, cli.timeout.0, !cli.no_isolate)?;
             let opts = LsOptions {
                 long: *long,
                 recursive: *recursive,
@@ -112,7 +112,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             dirs_first,
             path,
         } => {
-            let fs = wpd::open(cli.device)?;
+            let fs = device_fs::open_device_fs(cli.device, cli.timeout.0, !cli.no_isolate)?;
             let path = path.clone().unwrap_or_else(DevicePath::root);
             cmd::tree::run(fs.as_ref(), &path, *level, *json, *dirs_first, &mut out)?
         }
@@ -127,7 +127,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             sources,
             dest,
         } => {
-            let fs = wpd::open(cli.device)?;
+            let fs = device_fs::open_device_fs(cli.device, cli.timeout.0, !cli.no_isolate)?;
             let progress = if std::io::stderr().is_terminal() && cli.log_format == LogFormat::Text {
                 ProgressMode::Bar
             } else {
@@ -154,6 +154,11 @@ fn run(cli: &Cli) -> Result<usize, Error> {
         }
         Command::Verify { hash, dest } => {
             cmd::verify::run(dest, VerifyOptions { hash: *hash }, &mut out)?
+        }
+        // stdout carries the worker protocol only. Logs go to stderr.
+        Command::Worker { data_pipe } => {
+            cmd::worker::run_worker(*data_pipe)?;
+            0
         }
     };
     out.flush().map_err(error::stdout_err)?;

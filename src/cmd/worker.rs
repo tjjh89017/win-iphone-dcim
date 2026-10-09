@@ -9,7 +9,7 @@
 
 use std::io;
 
-use crate::device_fs::DeviceFs;
+use crate::device_fs::{DeviceFs, fake};
 use crate::error::{Error, Result};
 use crate::ipc::{self, Backend};
 use crate::model::DeviceInfo;
@@ -47,12 +47,11 @@ impl Backend for WpdBackend {
     }
 }
 
-/// In test builds, `WIN_IPHONE_DCIM_FAKE_FS=1` serves the in-memory fake
-/// device. Otherwise WPD, which is available only on Windows.
+/// `WIN_IPHONE_DCIM_FAKE_FS=1` serves the in-memory fake device for
+/// tests. Otherwise WPD, which is available only on Windows.
 fn backend() -> Result<Box<dyn Backend>> {
-    #[cfg(test)]
-    if std::env::var_os("WIN_IPHONE_DCIM_FAKE_FS").is_some_and(|v| v == "1") {
-        return Ok(Box::new(fake::FakeBackend));
+    if fake::requested() {
+        return Ok(Box::new(FakeBackend));
     }
     if cfg!(windows) {
         Ok(Box::new(WpdBackend))
@@ -61,26 +60,15 @@ fn backend() -> Result<Box<dyn Backend>> {
     }
 }
 
-#[cfg(test)]
-mod fake {
-    use super::*;
-    use crate::device_fs::fake::dcim;
+struct FakeBackend;
 
-    pub struct FakeBackend;
+impl Backend for FakeBackend {
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+        Ok(fake::devices())
+    }
 
-    impl Backend for FakeBackend {
-        fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
-            Ok(vec![DeviceInfo {
-                index: 0,
-                friendly_name: Some("Apple iPhone".into()),
-                manufacturer: Some("Apple Inc.".into()),
-                description: None,
-            }])
-        }
-
-        fn open(&self, _: Option<usize>) -> Result<Box<dyn DeviceFs>> {
-            Ok(Box::new(dcim()))
-        }
+    fn open(&self, _: Option<usize>) -> Result<Box<dyn DeviceFs>> {
+        Ok(Box::new(fake::from_env()))
     }
 }
 
@@ -90,7 +78,7 @@ mod tests {
 
     #[test]
     fn wpd_backend_is_unsupported_off_windows() {
-        if std::env::var_os("WIN_IPHONE_DCIM_FAKE_FS").is_none() {
+        if !fake::requested() {
             assert!(matches!(backend(), Err(Error::UnsupportedPlatform)));
         }
     }

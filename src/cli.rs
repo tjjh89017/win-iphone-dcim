@@ -1,10 +1,14 @@
 //! Command-line interface definition.
 
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::devpath::DevicePath;
+use crate::supervisor::DEFAULT_TIMEOUT;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,8 +41,60 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub diagnostic: bool,
 
+    /// Kill and restart the device worker after this long without activity
+    /// during a device call. Plain seconds, or a number with the unit `s`,
+    /// `m` or `h`, for example `90`, `90s` or `2m`.
+    #[arg(long, global = true, value_name = "DURATION", default_value_t = Timeout(DEFAULT_TIMEOUT))]
+    pub timeout: Timeout,
+
+    /// Run the WPD calls in this process instead of a worker process. A
+    /// hung device call then cannot be stopped. For debugging only.
+    #[arg(long, global = true)]
+    pub no_isolate: bool,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// Value of `--timeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeout(pub Duration);
+
+impl fmt::Display for Timeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}s", self.0.as_secs())
+    }
+}
+
+impl FromStr for Timeout {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        parse_timeout(s).map(Timeout)
+    }
+}
+
+/// Parse `--timeout`: whole seconds, optionally with the unit `s`, `m` or `h`.
+fn parse_timeout(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    let (digits, unit) = match s.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => s.split_at(i),
+        None => (s, "s"),
+    };
+    let factor = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return Err(format!("unknown unit {unit:?}; use s, m or h")),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| format!("{s:?} is not a duration like 120, 90s or 2m"))?;
+    match n.checked_mul(factor) {
+        Some(0) => Err("the timeout must be at least 1 s".into()),
+        Some(secs) => Ok(Duration::from_secs(secs)),
+        None => Err(format!("{s:?} is too large")),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +229,15 @@ pub enum Command {
         /// The copy root that holds `.win-iphone-dcim/manifest.jsonl`.
         #[arg(value_name = "DEST")]
         dest: PathBuf,
+    },
+
+    /// Internal: the worker process that owns the WPD COM objects. The
+    /// parent starts it. It speaks JSONL on stdout.
+    #[command(hide = true)]
+    Worker {
+        /// Handle number of the inherited write end of the data pipe.
+        #[arg(long)]
+        data_pipe: u64,
     },
 }
 
@@ -367,6 +432,37 @@ mod tests {
         assert!(hash);
         assert_eq!(dest, PathBuf::from("D:\\Backup"));
         assert!(parse(&["verify"]).is_err());
+    }
+
+    #[test]
+    fn timeout_and_no_isolate_are_global() {
+        let cli = parse(&["devices"]).unwrap();
+        assert_eq!(cli.timeout.0, DEFAULT_TIMEOUT);
+        assert!(!cli.no_isolate);
+        let cli = parse(&["ls", "--timeout", "5", "--no-isolate"]).unwrap();
+        assert_eq!(cli.timeout.0, Duration::from_secs(5));
+        assert!(cli.no_isolate);
+        for (arg, secs) in [("90s", 90), ("2m", 120), ("1h", 3600)] {
+            assert_eq!(
+                parse(&["--timeout", arg, "devices"]).unwrap().timeout.0,
+                Duration::from_secs(secs)
+            );
+        }
+        for bad in ["0", "0s", "-1", "1.5", "2d", "s", ""] {
+            assert!(parse(&["--timeout", bad, "devices"]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn worker_is_hidden_and_needs_the_pipe() {
+        let cli = parse(&["worker", "--data-pipe", "7"]).unwrap();
+        assert!(matches!(cli.command, Command::Worker { data_pipe: 7 }));
+        assert!(parse(&["worker"]).is_err());
+        let help = Cli::command().render_help().to_string();
+        assert!(
+            !help.lines().any(|l| l.trim_start().starts_with("worker")),
+            "{help}"
+        );
     }
 
     #[test]

@@ -21,11 +21,6 @@
 //! them. Every request that names an object also carries its device path,
 //! and the worker resolves the path when it does not know the id.
 
-// The binary uses these items after the integration step wires the
-// `worker` subcommand and `open_device_fs` into main.rs. Until then only
-// tests use them.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
@@ -69,6 +64,8 @@ pub struct Target {
 }
 
 impl Target {
+    /// A target by path only. Tests use it.
+    #[cfg(test)]
     pub fn path(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),

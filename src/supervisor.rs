@@ -11,10 +11,6 @@
 //! next request starts a new worker and opens the device again. Object ids
 //! from the old worker are never sent to the new one.
 
-// The binary uses these items after the integration step wires
-// `open_device_fs` into main.rs. Until then only tests use them.
-#![allow(dead_code)]
-
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, PipeReader, PipeWriter, Write};
 use std::path::PathBuf;
@@ -569,17 +565,6 @@ impl Supervisor {
         let what = format!("list {}", target.path);
         self.call(&Request::List { target }, &what, |r| match r {
             Response::Nodes { nodes } => Ok(nodes),
-            other => Err(Box::new(other)),
-        })
-    }
-
-    pub fn resolve(&mut self, path: &str) -> Result<WireNode> {
-        let what = format!("resolve {path}");
-        let req = Request::Resolve {
-            path: path.to_owned(),
-        };
-        self.call(&req, &what, |r| match r {
-            Response::Node { node } => Ok(node),
             other => Err(Box::new(other)),
         })
     }

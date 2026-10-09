@@ -17,7 +17,6 @@ pub struct DeviceInfo {
 pub struct ObjectId(pub Vec<u16>);
 
 impl ObjectId {
-    #[cfg(test)]
     pub fn new(s: &str) -> Self {
         Self(s.encode_utf16().collect())
     }

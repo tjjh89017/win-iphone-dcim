@@ -68,13 +68,18 @@ pub fn find_child<'a>(children: &'a [Node], component: &str) -> Option<&'a Node>
 /// process that the supervisor restarts after a hang (`timeout` without
 /// activity) or a crash. Without it they live in this process, which is
 /// for debugging only.
-#[allow(dead_code)] // main.rs uses it after the integration step.
+///
+/// Tests set `WIN_IPHONE_DCIM_FAKE_FS=1` to get the in-memory fake device
+/// instead of WPD, in the worker or, without `isolate`, in this process.
 pub fn open_device_fs(
     selection: Option<usize>,
     timeout: Duration,
     isolate: bool,
 ) -> Result<Box<dyn DeviceFs>> {
     if !isolate {
+        if fake::requested() {
+            return Ok(Box::new(fake::from_env()));
+        }
         return crate::wpd::open(selection);
     }
     let supervisor = Supervisor::start(WorkerCommand::current_exe()?, timeout, selection)?;
@@ -82,16 +87,17 @@ pub fn open_device_fs(
 }
 
 /// List the devices, in a short-lived worker process with `isolate`.
-#[allow(dead_code)] // main.rs uses it after the integration step.
 pub fn list_devices(timeout: Duration, isolate: bool) -> Result<Vec<DeviceInfo>> {
     if !isolate {
+        if fake::requested() {
+            return Ok(fake::devices());
+        }
         return crate::wpd::list_devices();
     }
     crate::supervisor::list_devices(&WorkerCommand::current_exe()?, timeout)
 }
 
 /// Largest data frame `RemoteFs` asks for. Same as the WPD buffer limit.
-#[allow(dead_code)] // main.rs uses it after the integration step.
 const REMOTE_CHUNK: u32 = crate::wpd::MAX_BUFFER as u32;
 
 /// `DeviceFs` over a worker process.
@@ -105,14 +111,12 @@ const REMOTE_CHUNK: u32 = crate::wpd::MAX_BUFFER as u32;
 ///
 /// A worker hang or crash fails the current call with
 /// `Error::WorkerRestarted`. The next call starts a new worker.
-#[allow(dead_code)] // main.rs uses it after the integration step.
 pub struct RemoteFs {
     supervisor: RefCell<Supervisor>,
     /// Device path of each node this value handed out, by node id.
     paths: RefCell<HashMap<ObjectId, String>>,
 }
 
-#[allow(dead_code)] // main.rs uses it after the integration step.
 impl RemoteFs {
     pub fn new(supervisor: Supervisor) -> Self {
         Self {
@@ -214,17 +218,51 @@ impl DeviceFs for RemoteFs {
     }
 }
 
-#[cfg(test)]
 pub mod fake {
-    //! In-memory device for tests.
+    //! In-memory device for tests. The release binary also contains it so
+    //! that end-to-end tests can drive the real executable, but only the
+    //! test environment variables below turn it on.
+
+    use std::path::PathBuf;
 
     use super::*;
     use crate::model::ObjectId;
+
+    /// `1` serves the fake device instead of WPD.
+    pub const FAKE_FS_ENV: &str = "WIN_IPHONE_DCIM_FAKE_FS";
+    /// A marker file path. The first `read_to` that creates this file
+    /// blocks forever, like a hung WPD `Read()`. Later reads, also in
+    /// other processes, see the file and work.
+    pub const FAKE_HANG_ONCE_ENV: &str = "WIN_IPHONE_DCIM_FAKE_HANG_ONCE";
+
+    /// True when the test environment asks for the fake device.
+    pub fn requested() -> bool {
+        std::env::var_os(FAKE_FS_ENV).is_some_and(|v| v == "1")
+    }
+
+    /// The device list of the fake.
+    pub fn devices() -> Vec<DeviceInfo> {
+        vec![DeviceInfo {
+            index: 0,
+            friendly_name: Some("Apple iPhone".into()),
+            manufacturer: Some("Apple Inc.".into()),
+            description: None,
+        }]
+    }
+
+    /// `dcim()` with the hooks from the test environment.
+    pub fn from_env() -> FakeFs {
+        let mut fs = dcim();
+        fs.hang_once = std::env::var_os(FAKE_HANG_ONCE_ENV).map(PathBuf::from);
+        fs
+    }
 
     pub struct FakeFs {
         nodes: Vec<(Node, Option<usize>, Vec<u8>)>,
         /// (node index, bytes before the error, fatal).
         failures: Vec<(usize, usize, bool)>,
+        /// Marker file for the one hung read. See `FAKE_HANG_ONCE_ENV`.
+        hang_once: Option<PathBuf>,
     }
 
     impl FakeFs {
@@ -244,6 +282,7 @@ pub mod fake {
             Self {
                 nodes: vec![(root, None, Vec::new())],
                 failures: Vec::new(),
+                hang_once: None,
             }
         }
 
@@ -274,12 +313,14 @@ pub mod fake {
         }
 
         /// Change a node after creation, for example to fake a wrong size.
+        #[cfg(test)]
         pub fn node_mut(&mut self, index: usize) -> &mut Node {
             &mut self.nodes[index].0
         }
 
         /// Make `read_to` of node `index` fail after `after` bytes. A fatal
         /// failure looks like a disconnected device.
+        #[cfg(test)]
         pub fn fail_read(&mut self, index: usize, after: usize, fatal: bool) {
             self.failures.push((index, after, fatal));
         }
@@ -308,6 +349,17 @@ pub mod fake {
         }
 
         fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64> {
+            if let Some(marker) = &self.hang_once
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(marker)
+                    .is_ok()
+            {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                }
+            }
             let index = self.index_of(file);
             let data = &self.nodes[index].2;
             if let Some(&(_, after, fatal)) = self.failures.iter().find(|f| f.0 == index) {
