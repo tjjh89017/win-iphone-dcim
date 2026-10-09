@@ -295,6 +295,9 @@ impl App {
                     .current
                     .filter(|&i| i < list.len())
                     .or(if list.len() == 1 { Some(0) } else { None });
+                if self.devices != list {
+                    self.clear_own_clipboard("the device list changed");
+                }
                 self.devices = list;
                 match keep {
                     Some(i) => self.open_device(i),
@@ -496,6 +499,15 @@ impl App {
 
     fn paste_busy(&self) -> bool {
         self.paste.as_ref().is_some_and(|p| p.busy())
+    }
+
+    /// Take this app's data object off the clipboard, so a later paste
+    /// does not use device paths of another device.
+    fn clear_own_clipboard(&mut self, why: &str) {
+        if let Some(obj) = self.clipboard.take() {
+            dataobject::clear_clipboard(&obj);
+            tracing::info!("cleared the clipboard because {why}");
+        }
     }
 
     fn open_device(&mut self, index: usize) {
@@ -793,6 +805,7 @@ impl App {
             if let Some(i) = choice
                 && self.current != Some(i)
             {
+                self.clear_own_clipboard("the device changed");
                 self.open_device(i);
             }
             if ui.button("Refresh").clicked() {
@@ -1080,6 +1093,20 @@ impl App {
         });
         if copy_key && !targets.is_empty() {
             actions.push(Action::ExplorerCopy(targets.clone()));
+        }
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (all, none) = ui.input(|i| {
+                let a = i.modifiers.command && i.key_pressed(egui::Key::A);
+                (
+                    a && !i.modifiers.shift,
+                    (a && i.modifiers.shift) || i.key_pressed(egui::Key::Escape),
+                )
+            });
+            if all {
+                actions.push(Action::SelectAll);
+            } else if none {
+                actions.push(Action::DeselectAll);
+            }
         }
         if let [one] = targets.as_slice()
             && ui.input(|i| i.key_pressed(egui::Key::Enter))

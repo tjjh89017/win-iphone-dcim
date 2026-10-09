@@ -238,7 +238,8 @@ The window:
   that folder. Entering a folder (double-click, a click in the tree, Open,
   the path bar, Up) adds it to the history. Shortcuts: Alt+Left = Back,
   Alt+Right = Forward, Alt+Up or Backspace = Up, mouse side buttons = Back
-  and Forward, Enter opens the one selected row.
+  and Forward, Enter opens the one selected row, Ctrl+A selects all rows in the
+  folder, Ctrl+Shift+A or Escape deselects all.
 - Bottom: the progress of the current file (speed and ETA), the overall
   progress, and a log of skip, retry and error lines.
 
