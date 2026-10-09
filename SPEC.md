@@ -173,6 +173,8 @@ win-iphone-dcim/
     └── e2e.rs                 # runs the built executable against the fake device
 ```
 
+Each module has its unit tests in `<module>/tests.rs` (for example `src/cli/tests.rs`).
+
 The crate is a library with two binaries: the CLI and the GUI. The GUI starts the CLI program in its own folder as the worker. Start the worker with the hidden `worker` subcommand. The parent and the worker exchange commands and results as JSONL through stdin/stdout. Use stderr only for logs. This rule keeps noise out of the protocol output.
 
 ## 5. CLI interface

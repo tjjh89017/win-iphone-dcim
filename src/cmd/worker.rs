@@ -79,13 +79,4 @@ impl Backend for FakeBackend {
 }
 
 #[cfg(all(test, not(windows)))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wpd_backend_is_unsupported_off_windows() {
-        if !fake::requested() {
-            assert!(matches!(backend(), Err(Error::UnsupportedPlatform)));
-        }
-    }
-}
+mod tests;
