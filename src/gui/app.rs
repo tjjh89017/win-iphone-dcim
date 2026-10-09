@@ -39,6 +39,12 @@ use crate::supervisor::{DEFAULT_TIMEOUT, WorkerCommand};
 
 /// Lines kept in the log list.
 const LOG_LIMIT: usize = 5000;
+/// Replies taken from the device thread in one step of `poll`.
+const REPLY_CHUNK: usize = 64;
+/// Time for replies in one frame. The rest waits for the next frame.
+const POLL_BUDGET: Duration = Duration::from_millis(5);
+/// A frame slower than this is logged at debug level.
+const SLOW_FRAME: Duration = Duration::from_millis(50);
 const SIZE_WIDTH: f32 = 90.0;
 const DATE_WIDTH: f32 = 150.0;
 /// Windows fonts for names that the default fonts cannot draw (CJK).
@@ -247,6 +253,9 @@ struct App {
     close_anyway: bool,
     /// `DoDragDrop` ate the button release; send egui one.
     release_pointer: bool,
+    /// When this frame started, and the replies it handled.
+    frame_start: Instant,
+    frame_replies: usize,
 }
 
 /// Bytes in a MiB, for the cache size limit.
@@ -292,6 +301,8 @@ impl App {
             close_warning: false,
             close_anyway: false,
             release_pointer: false,
+            frame_start: Instant::now(),
+            frame_replies: 0,
         };
         match WorkerCommand::cli_next_to_current_exe() {
             Ok(worker) => {
@@ -356,14 +367,29 @@ impl App {
         self.push_log(format!("[error] {text}"));
     }
 
-    /// Handle every reply that is waiting. Never blocks.
-    fn poll(&mut self) {
-        let replies: Vec<Reply> = match &self.device {
-            Some(d) => d.rx.try_iter().collect(),
-            None => return,
-        };
-        for reply in replies {
-            self.on_reply(reply);
+    /// Handle the waiting replies for up to `POLL_BUDGET`. Never blocks.
+    /// Replies left over wait for the next frame, which comes at once.
+    /// Return the number of handled replies.
+    fn poll(&mut self) -> usize {
+        let start = Instant::now();
+        let mut handled = 0;
+        loop {
+            let replies = match &self.device {
+                Some(d) => d.take_replies(REPLY_CHUNK),
+                None => return handled,
+            };
+            let full = replies.len() == REPLY_CHUNK;
+            handled += replies.len();
+            for reply in replies {
+                self.on_reply(reply);
+            }
+            if !full {
+                return handled;
+            }
+            if start.elapsed() >= POLL_BUDGET {
+                self.ctx.request_repaint();
+                return handled;
+            }
         }
     }
 
@@ -437,10 +463,12 @@ impl App {
                 self.copy.scan(files, bytes);
                 self.copy_status = format!("Scanning... {files} files, {}", human_size(bytes));
             }
-            Reply::CopyNote(note, text) => {
+            Reply::CopyNotes(notes) => {
                 // Copied files are in the counts; the log lists the rest.
-                if note != Note::Copy {
-                    self.push_log(text);
+                for (note, text) in notes {
+                    if note != Note::Copy {
+                        self.push_log(text);
+                    }
                 }
             }
             Reply::CopyDone(result) => {
@@ -823,6 +851,10 @@ impl App {
         }
         self.push_log(format!("[start] copy to {}", dest.display()));
         self.copy_dest = dest;
+        tracing::debug!(
+            "copy: request sent {} ms into the frame, totals {totals:?}",
+            self.frame_start.elapsed().as_millis()
+        );
     }
 
     fn copy_checked(&mut self) {
@@ -916,11 +948,18 @@ impl App {
                     None => self.status = format!("{} is not in the cache", file_name(&path)),
                 },
                 Action::CopyTo(paths) => {
-                    if !paths.is_empty()
-                        && !self.copying
-                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.start_copy(CopySet::Paths(paths), dir);
+                    if !paths.is_empty() && !self.copying {
+                        let dir = rfd::FileDialog::new().pick_folder();
+                        // The slow-frame check measures the work after the
+                        // dialog, not the time the user spent in it.
+                        tracing::debug!(
+                            "folder dialog returned {} ms into the frame",
+                            self.frame_start.elapsed().as_millis()
+                        );
+                        self.frame_start = Instant::now();
+                        if let Some(dir) = dir {
+                            self.start_copy(CopySet::Paths(paths), dir);
+                        }
                     }
                 }
                 Action::Properties(path) => {
@@ -1987,7 +2026,8 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll();
+        self.frame_start = Instant::now();
+        self.frame_replies = self.poll();
         self.finish_explorer_copy();
         if ctx.input(|i| i.viewport().close_requested()) && !self.close_anyway && self.paste_busy()
         {
@@ -2045,6 +2085,14 @@ impl eframe::App for App {
         {
             // Keep speed and ETA moving between progress replies.
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        let took = self.frame_start.elapsed();
+        if took > SLOW_FRAME {
+            tracing::debug!(
+                "slow frame: {} ms, {} replies",
+                took.as_millis(),
+                self.frame_replies
+            );
         }
     }
 }

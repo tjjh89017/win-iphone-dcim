@@ -28,6 +28,8 @@ use crate::supervisor::{self, WorkerCommand};
 
 /// The fastest rate of progress replies.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// Copy log lines that wait for the next progress reply, at most.
+const NOTE_BATCH: usize = 256;
 
 /// How the device thread finds and opens devices.
 pub trait Connector: Send {
@@ -149,7 +151,8 @@ pub enum Reply {
         bytes: u64,
     },
     CopyProgress(CopyProgress),
-    CopyNote(Note, String),
+    /// Log lines of the copy, in order, batched like the progress.
+    CopyNotes(Vec<(Note, String)>),
     CopyDone(std::result::Result<CopySummary, String>),
     DownloadProgress {
         path: String,
@@ -205,6 +208,9 @@ pub struct DeviceHandle {
     pub reply_tx: Sender<Reply>,
     /// Set to stop a copy after the current file.
     pub cancel: Arc<AtomicBool>,
+    /// True after the device thread woke the UI, until the UI takes the
+    /// replies. The device thread wakes the UI once per take.
+    woken: Arc<AtomicBool>,
 }
 
 impl DeviceHandle {
@@ -219,9 +225,11 @@ impl DeviceHandle {
         let (tx, requests) = mpsc::channel();
         let (reply_tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let woken = Arc::new(AtomicBool::new(false));
         let out = Out {
             tx: reply_tx.clone(),
             wake,
+            woken: woken.clone(),
         };
         let thread_cancel = cancel.clone();
         // The thread ends when the handle drops the request channel. Nobody
@@ -250,7 +258,16 @@ impl DeviceHandle {
             rx,
             reply_tx,
             cancel,
+            woken,
         }
+    }
+
+    /// Up to `max` waiting replies, oldest first. Never blocks. The rest
+    /// stay for the next call. The next reply after this call wakes the
+    /// UI again.
+    pub fn take_replies(&self, max: usize) -> Vec<Reply> {
+        self.woken.store(false, Ordering::SeqCst);
+        self.rx.try_iter().take(max).collect()
     }
 
     /// A sender for requests from other threads, for example the paste
@@ -276,12 +293,18 @@ impl Drop for DeviceHandle {
 struct Out {
     tx: Sender<Reply>,
     wake: Box<dyn Fn() + Send>,
+    /// See `DeviceHandle::woken`.
+    woken: Arc<AtomicBool>,
 }
 
 impl Out {
+    /// Send `reply` and wake the UI, unless a wake is pending. A burst of
+    /// replies then posts one repaint request, not one per reply.
     fn send(&self, reply: Reply) {
         let _ = self.tx.send(reply);
-        (self.wake)();
+        if !self.woken.swap(true, Ordering::SeqCst) {
+            (self.wake)();
+        }
     }
 }
 
@@ -325,9 +348,11 @@ impl DeviceThread {
                 manifest,
                 totals,
             } => {
+                let started = Instant::now();
                 let result = self
-                    .copy(&what, &dest, force, manifest, totals)
+                    .copy(&what, &dest, force, manifest, totals, started)
                     .map_err(text);
+                tracing::debug!("copy: done in {} ms", started.elapsed().as_millis());
                 self.out.send(Reply::CopyDone(result));
             }
             Request::Download { path } => match self.download(&path) {
@@ -509,6 +534,7 @@ impl DeviceThread {
         force: bool,
         manifest: bool,
         totals: Option<(u64, u64)>,
+        started: Instant,
     ) -> Result<CopySummary> {
         // One memo for the scan and the copy: each folder is listed once.
         let cached = CachedFs::new(self.fs()?);
@@ -578,7 +604,12 @@ impl DeviceThread {
                 (scan.files, scan.bytes)
             }
         };
-        let mut sink = ChannelSink::new(&self.out, &self.cancel, files, bytes);
+        tracing::debug!(
+            "copy: {} source(s), engine starts {} ms after the request",
+            sources.len(),
+            started.elapsed().as_millis()
+        );
+        let mut sink = ChannelSink::new(&self.out, &self.cancel, files, bytes, started);
         match selection {
             Some(selection) => {
                 let view = SelectedFs::new(fs, selection);
@@ -715,6 +746,11 @@ impl ProgressSink for ScanSink<'_> {
 }
 
 /// Engine progress as replies, at most one progress reply per interval.
+///
+/// Per-file events only update the state. A skip or a small file takes
+/// microseconds, so one reply per file would flood the UI. The state goes
+/// out with the next event after the interval, and always at the end.
+/// Log lines wait for the same reply, or until `NOTE_BATCH` of them wait.
 struct ChannelSink<'a> {
     out: &'a Out,
     cancel: &'a AtomicBool,
@@ -722,12 +758,16 @@ struct ChannelSink<'a> {
     /// Files and bytes that the planner of this run found so far.
     planned: (u64, u64),
     last: Instant,
+    notes: Vec<(Note, String)>,
+    /// When the device thread got the copy request. `None` after the
+    /// first file is logged.
+    started: Option<Instant>,
 }
 
 impl<'a> ChannelSink<'a> {
     /// The totals come from the pre-scan or the UI tree. They grow if the
     /// planner finds more.
-    fn new(out: &'a Out, cancel: &'a AtomicBool, files: u64, bytes: u64) -> Self {
+    fn new(out: &'a Out, cancel: &'a AtomicBool, files: u64, bytes: u64, started: Instant) -> Self {
         Self {
             out,
             cancel,
@@ -738,13 +778,33 @@ impl<'a> ChannelSink<'a> {
             },
             planned: (0, 0),
             last: Instant::now(),
+            notes: Vec::new(),
+            started: Some(started),
         }
     }
 
     fn push(&mut self, force: bool) {
         if force || self.last.elapsed() >= PROGRESS_INTERVAL {
             self.last = Instant::now();
+            self.flush_notes();
             self.out.send(Reply::CopyProgress(self.progress.clone()));
+        }
+    }
+
+    fn flush_notes(&mut self) {
+        if !self.notes.is_empty() {
+            self.out
+                .send(Reply::CopyNotes(std::mem::take(&mut self.notes)));
+        }
+    }
+
+    /// Log the time from the request to the first file, once.
+    fn first_file(&mut self, what: &str) {
+        if let Some(started) = self.started.take() {
+            tracing::debug!(
+                "copy: first file {what} {} ms after the request",
+                started.elapsed().as_millis()
+            );
         }
     }
 }
@@ -763,19 +823,21 @@ impl ProgressSink for ChannelSink<'_> {
     }
 
     fn settled(&mut self, size: Option<u64>) {
+        self.first_file("settled");
         self.progress.files_done += 1;
         self.progress.bytes_done += size.unwrap_or(0);
         self.push(false);
     }
 
     fn file_start(&mut self, source: &str, size: Option<u64>) {
+        self.first_file("starts");
         self.progress.current = Some(CurrentFile {
             source: source.to_owned(),
             size,
             bytes: 0,
             started: Instant::now(),
         });
-        self.push(true);
+        self.push(false);
     }
 
     fn bytes(&mut self, n: u64) {
@@ -799,15 +861,35 @@ impl ProgressSink for ChannelSink<'_> {
             self.progress.files_done += 1;
             self.progress.bytes_done += c.size.unwrap_or(c.bytes);
         }
+        self.push(false);
+    }
+
+    fn finish(&mut self) {
         self.push(true);
     }
 
     fn note(&mut self, note: Note, text: &str) {
-        self.out.send(Reply::CopyNote(note, text.to_owned()));
+        self.notes.push((note, text.to_owned()));
+        if self.notes.len() >= NOTE_BATCH {
+            self.flush_notes();
+        } else {
+            self.push(false);
+        }
+    }
+
+    fn summary(&mut self, _summary: &CopySummary) {
+        self.flush_notes();
     }
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ChannelSink<'_> {
+    /// A run that ends with an error sends its last lines too.
+    fn drop(&mut self) {
+        self.flush_notes();
     }
 }
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::device_fs::fake::{self, dcim};
 use crate::gui::selection::Tree;
+use std::sync::atomic::AtomicUsize;
 
 struct FakeConnector;
 
@@ -42,6 +43,11 @@ fn until(h: &DeviceHandle, done: impl Fn(&Reply) -> bool) -> Vec<Reply> {
             return all;
         }
     }
+}
+
+/// True if `r` holds a `note` line that ends with `end`.
+fn has_note(r: &Reply, note: Note, end: &str) -> bool {
+    matches!(r, Reply::CopyNotes(lines) if lines.iter().any(|(n, t)| *n == note && t.ends_with(end)))
 }
 
 fn open(h: &DeviceHandle) -> Tree {
@@ -151,11 +157,7 @@ fn browse_and_copy_the_checked_set() {
         panic!("copy failed");
     };
     assert_eq!((summary.copied, summary.skipped), (0, 2));
-    assert!(
-        replies
-            .iter()
-            .any(|r| matches!(r, Reply::CopyNote(Note::Skip, t) if t.ends_with("verified")))
-    );
+    assert!(replies.iter().any(|r| has_note(r, Note::Skip, "verified")));
 }
 
 #[test]
@@ -201,9 +203,9 @@ fn copy_to_copies_the_given_paths() {
     };
     assert_eq!((summary.copied, summary.skipped, summary.exists), (0, 2, 0));
     assert!(
-        replies.iter().any(
-            |r| matches!(r, Reply::CopyNote(Note::Skip, t) if t.ends_with("exists, same size"))
-        )
+        replies
+            .iter()
+            .any(|r| has_note(r, Note::Skip, "exists, same size"))
     );
     assert!(!dest.path().join(".win-iphone-dcim").exists());
 }
@@ -454,4 +456,138 @@ fn requests_without_a_device_fail_cleanly() {
     let h = handle(cache.path());
     h.send(Request::List { path: "/".into() });
     assert!(matches!(next(&h), Reply::Listed { result: Err(_), .. }));
+}
+
+/// A sink on a plain channel, with a wake counter.
+fn sink_out() -> (Out, Receiver<Reply>, Arc<AtomicUsize>) {
+    let (tx, rx) = mpsc::channel();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let w = wakes.clone();
+    let out = Out {
+        tx,
+        wake: Box::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        }),
+        woken: Arc::new(AtomicBool::new(false)),
+    };
+    (out, rx, wakes)
+}
+
+#[test]
+fn channel_sink_coalesces_per_file_events() {
+    let (out, rx, _) = sink_out();
+    let cancel = AtomicBool::new(false);
+    let mut sink = ChannelSink::new(&out, &cancel, 1000, 0, Instant::now());
+    sink.begin();
+    for i in 0..1000 {
+        sink.found(Some(1));
+        if i % 2 == 0 {
+            sink.file_start(&format!("/f{i}"), Some(1));
+            sink.bytes(1);
+            sink.file_end(true);
+        } else {
+            sink.settled(Some(1));
+            sink.note(Note::Skip, &format!("[skip] /f{i}"));
+        }
+    }
+    sink.finish();
+    sink.summary(&CopySummary::default());
+    drop(sink);
+    let replies: Vec<Reply> = rx.try_iter().collect();
+    let progress: Vec<&CopyProgress> = replies
+        .iter()
+        .filter_map(|r| match r {
+            Reply::CopyProgress(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    // One at the begin, one at the end, and one per interval between.
+    assert!(progress.len() < 20, "{} progress replies", progress.len());
+    let last = progress.last().unwrap();
+    assert_eq!((last.files_done, last.bytes_done), (1000, 1000));
+    assert!(last.current.is_none());
+    let notes: Vec<&(Note, String)> = replies
+        .iter()
+        .filter_map(|r| match r {
+            Reply::CopyNotes(n) => Some(n),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(notes.len(), 500);
+    assert_eq!(notes[0].1, "[skip] /f1");
+    assert_eq!(notes[499].1, "[skip] /f999");
+    let batches = replies
+        .iter()
+        .filter(|r| matches!(r, Reply::CopyNotes(_)))
+        .count();
+    assert!(batches <= 500 / NOTE_BATCH + 20, "{batches} note replies");
+}
+
+#[test]
+fn channel_sink_sends_lines_after_finish() {
+    let (out, rx, _) = sink_out();
+    let cancel = AtomicBool::new(false);
+    let mut sink = ChannelSink::new(&out, &cancel, 0, 0, Instant::now());
+    sink.begin();
+    sink.finish();
+    // The engine prints the summary after `finish`.
+    sink.note(Note::Summary, "[done]");
+    drop(sink);
+    let last = rx.try_iter().last().unwrap();
+    assert!(matches!(last, Reply::CopyNotes(n) if n == [(Note::Summary, "[done]".to_owned())]));
+}
+
+#[test]
+fn replies_wake_the_ui_once_per_take() {
+    let (out, rx, wakes) = sink_out();
+    for _ in 0..100 {
+        out.send(Reply::PasteNote("x".into()));
+    }
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(rx.try_iter().count(), 100);
+    out.woken.store(false, Ordering::SeqCst);
+    out.send(Reply::PasteNote("y".into()));
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn take_replies_takes_at_most_max_and_wakes_again() {
+    let cache = tempfile::tempdir().unwrap();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let w = wakes.clone();
+    let h = DeviceHandle::spawn(
+        Box::new(FakeConnector),
+        Some(cache.path().to_path_buf()),
+        u64::MAX,
+        Box::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    for _ in 0..5 {
+        h.send(Request::ListDevices);
+    }
+    // The device thread answers in order; wait for all five.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = Vec::new();
+    while got.len() < 5 && Instant::now() < deadline {
+        got.extend(
+            h.take_replies(2)
+                .into_iter()
+                .map(|r| matches!(r, Reply::Devices(Ok(_)))),
+        );
+        assert!(got.len() <= 5);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(got, [true; 5]);
+    assert!(wakes.load(Ordering::SeqCst) >= 1);
+    assert!(h.take_replies(2).is_empty());
+    let before = wakes.load(Ordering::SeqCst);
+    h.send(Request::ListDevices);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while wakes.load(Ordering::SeqCst) == before && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(wakes.load(Ordering::SeqCst), before + 1);
+    assert_eq!(h.take_replies(64).len(), 1);
 }
