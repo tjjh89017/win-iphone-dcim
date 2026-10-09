@@ -19,7 +19,7 @@ use super::selection::{Entry, SelectedFs, Selection};
 use crate::backup::engine::{self, CopyOptions, CopySummary, Note, OnExists, ProgressSink};
 use crate::backup::manifest::device_key;
 use crate::backup::transfer::transfer;
-use crate::device_fs::{self, DeviceFs};
+use crate::device_fs::{self, CachedFs, DeviceFs};
 use crate::devpath::DevicePath;
 use crate::error::{Error, Result};
 use crate::model::{DeviceInfo, Node, join_device_path};
@@ -500,7 +500,9 @@ impl DeviceThread {
         force: bool,
         totals: Option<(u64, u64)>,
     ) -> Result<CopySummary> {
-        let fs = self.fs()?;
+        // One memo for the scan and the copy: each folder is listed once.
+        let cached = CachedFs::new(self.fs()?);
+        let fs: &dyn DeviceFs = &cached;
         let (paths, selection) = match what {
             CopySet::Checked(selection) => match selection.copy_root() {
                 Some(root) => (vec![root], Some(selection)),

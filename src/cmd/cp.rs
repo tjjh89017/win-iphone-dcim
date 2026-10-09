@@ -12,7 +12,7 @@ use std::{
 
 use crate::backup::engine::{self, CopyOptions, ProgressSink};
 pub use crate::backup::engine::{DEFAULT_RETRIES, OnExists, backoff};
-use crate::device_fs::DeviceFs;
+use crate::device_fs::{CachedFs, DeviceFs};
 use crate::devpath::DevicePath;
 #[cfg(test)]
 use crate::error::Error;
@@ -92,7 +92,9 @@ pub fn run(
         mode,
         progress: None,
     };
-    engine::run(fs, sources, dest, opts.engine(), &mut sink, out).map(|s| s.failed)
+    // Each source path resolves from the root: list each folder once.
+    let fs = CachedFs::new(fs);
+    engine::run(&fs, sources, dest, opts.engine(), &mut sink, out).map(|s| s.failed)
 }
 
 /// `Progress` behind the engine's sink. The bars appear when the run begins.

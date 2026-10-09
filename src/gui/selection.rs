@@ -9,6 +9,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use super::filedesc::{self, FileItem};
 use crate::cmd::sort::{SortKey, desc_none_last, name_order};
@@ -73,6 +75,14 @@ struct Item {
 pub struct Tree {
     root: String,
     items: HashMap<String, Item>,
+    /// See `stamp`.
+    stamp: u64,
+}
+
+/// A value that no tree had before, in this process.
+fn next_stamp() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 impl Tree {
@@ -89,7 +99,17 @@ impl Tree {
                 any: false,
             },
         );
-        Self { root: path, items }
+        Self {
+            root: path,
+            items,
+            stamp: next_stamp(),
+        }
+    }
+
+    /// Changes when a listing or an entry changes, also to a value that
+    /// no other tree had. Check marks do not change it.
+    pub fn stamp(&self) -> u64 {
+        self.stamp
     }
 
     pub fn root(&self) -> &str {
@@ -182,9 +202,10 @@ impl Tree {
         let inherit = item.checked;
         let old = item.children.clone().unwrap_or_default();
         let mut paths = Vec::with_capacity(children.len());
+        let mut seen = HashSet::with_capacity(children.len());
         for entry in children {
             let child = entry.path.clone();
-            if paths.contains(&child) {
+            if !seen.insert(child.clone()) {
                 // Two objects with the same name share one path.
                 continue;
             }
@@ -205,12 +226,13 @@ impl Tree {
                 }
             }
         }
-        for gone in old.iter().filter(|p| !paths.contains(p)) {
+        for gone in old.iter().filter(|p| !seen.contains(*p)) {
             self.remove(gone);
         }
         if let Some(item) = self.items.get_mut(path) {
             item.children = Some(paths);
         }
+        self.stamp = next_stamp();
         self.update_up(path);
     }
 
@@ -406,6 +428,44 @@ pub fn sort_rows(entries: &mut [&Entry], key: SortKey, descending: bool) {
     });
 }
 
+/// The sorted rows of the file list, kept until the folder, the sort or the
+/// tree stamp changes. The file list asks for them every frame.
+#[derive(Default)]
+pub struct RowCache {
+    key: Option<(u64, String, SortKey, bool)>,
+    rows: Rc<[String]>,
+}
+
+impl RowCache {
+    /// The child paths of `folder` in `sort_rows` order.
+    pub fn rows(
+        &mut self,
+        tree: &Tree,
+        folder: &str,
+        key: SortKey,
+        descending: bool,
+    ) -> Rc<[String]> {
+        if let Some((stamp, f, k, d)) = &self.key
+            && *stamp == tree.stamp()
+            && f == folder
+            && *k == key
+            && *d == descending
+        {
+            return self.rows.clone();
+        }
+        let mut entries: Vec<&Entry> = tree
+            .children(folder)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| tree.entry(p))
+            .collect();
+        sort_rows(&mut entries, key, descending);
+        self.rows = entries.into_iter().map(|e| e.path.clone()).collect();
+        self.key = Some((tree.stamp(), folder.to_owned(), key, descending));
+        self.rows.clone()
+    }
+}
+
 /// The highlighted rows of the file list. This is not the check marks:
 /// Open and "Copy to..." act on it. Ctrl-click toggles one row,
 /// Shift-click selects a range from the anchor row.
@@ -537,6 +597,41 @@ impl ListSelection {
             .filter(|p| self.selected.contains(*p))
             .cloned()
             .collect()
+    }
+}
+
+/// The copy sources for `paths`. When `paths` are all the loaded children
+/// of one folder, the folder contents (`<folder>/`) replace them: the copy
+/// then lists the folder once and does not resolve each path. Else `paths`
+/// as they are.
+pub fn collapse_to_parent(paths: Vec<String>, tree: &Tree) -> Vec<String> {
+    let Some(parent) = paths.first().and_then(|p| parent_of(p)) else {
+        return paths;
+    };
+    if paths.len() < 2 || paths.iter().any(|p| parent_of(p) != Some(parent)) {
+        return paths;
+    }
+    let Some(children) = tree.children(parent) else {
+        return paths;
+    };
+    let set: HashSet<&str> = paths.iter().map(String::as_str).collect();
+    if set.len() != children.len() || !children.iter().all(|c| set.contains(c.as_str())) {
+        return paths;
+    }
+    let contents = if parent.ends_with('/') {
+        parent.to_owned()
+    } else {
+        format!("{parent}/")
+    };
+    vec![contents]
+}
+
+/// The parent folder of a device path. `None` for the root.
+fn parent_of(path: &str) -> Option<&str> {
+    match path.rsplit_once('/')? {
+        (_, "") => None,
+        ("", _) => Some("/"),
+        (parent, _) => Some(parent),
     }
 }
 

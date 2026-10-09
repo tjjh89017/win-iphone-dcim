@@ -64,6 +64,51 @@ pub fn find_child<'a>(children: &'a [Node], component: &str) -> Option<&'a Node>
         .find_map(|by| children.iter().find(|c| c.matches(component, by)))
 }
 
+/// `DeviceFs` that lists each folder at most once.
+///
+/// A copy resolves every source path from the root. Without this memo, a
+/// copy of many files in one folder lists the root and each parent folder
+/// once per file. Keep one value for one copy only: the memo never expires.
+/// A failed listing is not kept.
+pub struct CachedFs<'a> {
+    inner: &'a dyn DeviceFs,
+    lists: RefCell<HashMap<ObjectId, Vec<Node>>>,
+}
+
+impl<'a> CachedFs<'a> {
+    pub fn new(inner: &'a dyn DeviceFs) -> Self {
+        Self {
+            inner,
+            lists: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+impl DeviceFs for CachedFs<'_> {
+    fn root(&self) -> Node {
+        self.inner.root()
+    }
+
+    fn list(&self, dir: &Node) -> Result<Vec<Node>> {
+        if let Some(children) = self.lists.borrow().get(&dir.id) {
+            return Ok(children.clone());
+        }
+        let children = self.inner.list(dir)?;
+        self.lists
+            .borrow_mut()
+            .insert(dir.id.clone(), children.clone());
+        Ok(children)
+    }
+
+    fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64> {
+        self.inner.read_to(file, out)
+    }
+
+    fn device_id(&self) -> Option<String> {
+        self.inner.device_id()
+    }
+}
+
 /// Open the device. With `isolate` the WPD COM objects live in a worker
 /// process that the supervisor restarts after a hang (`timeout` without
 /// activity) or a crash. Without it they live in this process, which is
@@ -202,6 +247,19 @@ impl DeviceFs for RemoteFs {
         let parent = target.path.clone();
         let wire = supervisor.list(target)?;
         let plain: Vec<Node> = wire.iter().cloned().map(Node::from).collect();
+        // The child that `find_child` gives for each component, without a
+        // scan of all children per child.
+        let mut by_original: HashMap<&str, usize> = HashMap::new();
+        let mut by_name: HashMap<&str, usize> = HashMap::new();
+        for (i, n) in plain.iter().enumerate() {
+            if let Some(c) = n.original_file_name.as_deref() {
+                by_original.entry(c).or_insert(i);
+            }
+            if let Some(c) = n.name.as_deref() {
+                by_name.entry(c).or_insert(i);
+            }
+        }
+        let found = |c: &str| by_original.get(c).or_else(|| by_name.get(c)).copied();
         Ok(wire
             .into_iter()
             .zip(&plain)
@@ -211,7 +269,7 @@ impl DeviceFs for RemoteFs {
                     .as_deref()
                     .or(n.name.as_deref())
                     .filter(|c| !c.is_empty() && !c.contains('/'))
-                    .filter(|c| find_child(&plain, c).is_some_and(|found| found.id == n.id))
+                    .filter(|c| found(c).is_some_and(|i| plain[i].id == n.id))
                     .map(|c| join_device_path(&parent, c));
                 self.node(generation, w, path)
             })

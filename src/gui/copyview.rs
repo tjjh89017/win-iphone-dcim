@@ -45,6 +45,8 @@ pub struct CopyTracker {
     pub scanned: (u64, u64),
     /// How the last run ended. `None` while it runs.
     pub end: Option<EndState>,
+    /// A run started and did not end yet.
+    active: bool,
 }
 
 impl CopyTracker {
@@ -59,6 +61,7 @@ impl CopyTracker {
             scanning: false,
             scanned: (0, 0),
             end: None,
+            active: false,
         }
     }
 
@@ -83,6 +86,7 @@ impl CopyTracker {
     /// A new run starts.
     pub fn start(&mut self, now: Instant) {
         *self = Self::new(now);
+        self.active = true;
     }
 
     /// A progress reply of the device thread.
@@ -130,6 +134,7 @@ impl CopyTracker {
     /// The run ended. Keep the overall line.
     pub fn finish(&mut self, summary: &CopySummary, now: Instant) {
         self.scanning = false;
+        self.active = false;
         let detail = format!(
             "copied {}, skipped {}, exists {}, failed {}  {}  elapsed {}  avg {}",
             summary.copied,
@@ -165,6 +170,7 @@ impl CopyTracker {
     /// The run stopped with `error`. Keep the overall line.
     pub fn fail(&mut self, error: &str) {
         self.scanning = false;
+        self.active = false;
         self.end = Some(EndState::Failed);
         self.final_line = Some(format!("Failed: {} \u{b7} {error}", self.files_text()));
     }
@@ -230,10 +236,16 @@ impl CopyTracker {
     }
 
     /// The fraction and text of the file bar. Between files it shows the
-    /// last file.
+    /// last file. Before the first file of a run it shows that the run
+    /// prepares: the device thread scans or resolves the sources.
     pub fn file_line(&self, now: Instant) -> (f32, String) {
         let Some(l) = &self.last_file else {
-            return (0.0, "No file in transfer".into());
+            let text = if self.preparing() {
+                "Preparing..."
+            } else {
+                "No file in transfer"
+            };
+            return (0.0, text.into());
         };
         let name = l.source.rsplit('/').next().unwrap_or(&l.source);
         let fraction = l
@@ -258,6 +270,14 @@ impl CopyTracker {
             }
         }
         (fraction, text)
+    }
+
+    /// The run started, but no file started or settled yet.
+    pub fn preparing(&self) -> bool {
+        self.active
+            && self.last_file.is_none()
+            && self.progress.current.is_none()
+            && self.progress.files_done == 0
     }
 
     /// Bytes counted by the run meter.

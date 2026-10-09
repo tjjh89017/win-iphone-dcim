@@ -73,3 +73,20 @@ fn folders_first_is_stable() {
     folders_first(&mut v);
     assert_eq!(names(&v), ["z", "m", "a"]);
 }
+
+#[test]
+fn name_order_matches_the_lowercase_strings() {
+    let names = [
+        "", "a", "A", "a.HEIC", "A.heic", "IMG_0001", "img_0001", "IMG_0002", "Z", "_", "é", "É",
+        "İ", "i\u{307}", "ΟΔΟΣ", "οδος", "οδοσ", "ß", "SS", "a\u{0}", "a b",
+    ];
+    for x in names {
+        for y in names {
+            let expected = x
+                .to_lowercase()
+                .cmp(&y.to_lowercase())
+                .then_with(|| x.cmp(y));
+            assert_eq!(name_order(x, y), expected, "{x:?} vs {y:?}");
+        }
+    }
+}

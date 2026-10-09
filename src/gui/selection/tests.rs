@@ -385,3 +385,84 @@ fn selected_fs_lists_only_marked_objects() {
     assert_eq!(names(A), ["IMG_0002.MOV"]);
     assert_eq!(names(B), ["IMG_0001.HEIC"]);
 }
+
+#[test]
+fn collapse_gives_the_folder_contents_for_all_children() {
+    let tree = loaded(&dcim());
+    assert_eq!(
+        collapse_to_parent(vec![A2.into(), A1.into()], &tree),
+        [format!("{A}/")]
+    );
+    assert_eq!(
+        collapse_to_parent(vec![A.into(), B.into()], &tree),
+        [format!("{DCIM}/")]
+    );
+}
+
+#[test]
+fn collapse_keeps_a_partial_or_mixed_set() {
+    let tree = loaded(&dcim());
+    // Only some children of the folder.
+    assert_eq!(collapse_to_parent(vec![A1.into()], &tree), [A1]);
+    // Different parents.
+    assert_eq!(
+        collapse_to_parent(vec![A1.into(), B1.into()], &tree),
+        [A1, B1]
+    );
+    // A single child stays a single path.
+    assert_eq!(collapse_to_parent(vec![B1.into()], &tree), [B1]);
+    assert!(collapse_to_parent(Vec::new(), &tree).is_empty());
+    assert_eq!(collapse_to_parent(vec!["/".into()], &tree), ["/"]);
+}
+
+#[test]
+fn collapse_keeps_paths_of_an_unloaded_folder() {
+    let root = dcim().root();
+    let tree = Tree::new(Entry::new(None, &root));
+    assert_eq!(
+        collapse_to_parent(vec![A1.into(), A2.into()], &tree),
+        [A1, A2]
+    );
+}
+
+#[test]
+fn stamp_changes_with_listings_not_with_marks() {
+    let mut tree = loaded(&dcim());
+    let before = tree.stamp();
+    tree.set_checked(A1, true);
+    tree.toggle(B1);
+    assert_eq!(tree.stamp(), before);
+    let entries: Vec<Entry> = tree
+        .children(A)
+        .unwrap()
+        .iter()
+        .map(|p| tree.entry(p).unwrap().clone())
+        .collect();
+    tree.set_children(A, entries);
+    assert_ne!(tree.stamp(), before);
+    let other = loaded(&dcim());
+    assert_ne!(other.stamp(), tree.stamp());
+}
+
+#[test]
+fn row_cache_reuses_rows_until_an_input_changes() {
+    let mut tree = loaded(&dcim());
+    let mut cache = RowCache::default();
+    let first = cache.rows(&tree, A, SortKey::Name, false);
+    assert_eq!(&*first, [A1, A2]);
+    let again = cache.rows(&tree, A, SortKey::Name, false);
+    assert!(Rc::ptr_eq(&first, &again));
+
+    let reversed = cache.rows(&tree, A, SortKey::Name, true);
+    assert_eq!(&*reversed, [A2, A1]);
+    let other = cache.rows(&tree, DCIM, SortKey::Name, true);
+    assert_eq!(&*other, [B, A]);
+
+    // A new listing of the folder rebuilds the rows.
+    let before = cache.rows(&tree, A, SortKey::Name, false);
+    let one = vec![tree.entry(A1).unwrap().clone()];
+    tree.set_children(A, one);
+    let after = cache.rows(&tree, A, SortKey::Name, false);
+    assert!(!Rc::ptr_eq(&before, &after));
+    assert_eq!(&*after, [A1]);
+}

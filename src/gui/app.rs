@@ -1,9 +1,11 @@
 //! The egui window. It runs on the UI thread and talks to the device
 //! thread only through `DeviceHandle`.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -25,7 +27,9 @@ use super::dnd;
 use super::filedesc::{self, Listing};
 use super::menu::{self, MenuState};
 use super::nav::{NavHistory, breadcrumbs};
-use super::selection::{Check, Entry, ListSelection, Tree, band_rows, sort_rows};
+use super::selection::{
+    Check, Entry, ListSelection, RowCache, Tree, band_rows, collapse_to_parent,
+};
 use super::shell;
 use crate::backup::engine::Note;
 use crate::cmd::sort::SortKey;
@@ -204,6 +208,8 @@ struct App {
     nav: NavHistory,
     /// The sort column of the file list, and true for descending.
     sort: (SortKey, bool),
+    /// The sorted rows of the file list.
+    row_cache: RefCell<RowCache>,
     /// The highlighted rows of the file list.
     rows: ListSelection,
     /// The object in the properties window.
@@ -259,6 +265,7 @@ impl App {
             folder: None,
             nav: NavHistory::default(),
             sort: (SortKey::Name, false),
+            row_cache: RefCell::default(),
             rows: ListSelection::default(),
             properties: None,
             about: false,
@@ -788,6 +795,10 @@ impl App {
             CopySet::Checked(selection) => t.totals(&selection.top_paths()),
             CopySet::Paths(paths) => t.totals(paths),
         });
+        let what = match (what, &self.tree) {
+            (CopySet::Paths(paths), Some(t)) => CopySet::Paths(collapse_to_parent(paths, t)),
+            (what, _) => what,
+        };
         d.cancel.store(false, Ordering::SeqCst);
         d.send(Request::Copy {
             what,
@@ -822,18 +833,13 @@ impl App {
     }
 
     /// The rows of the file list: the children of the shown folder.
-    fn list_rows(&self) -> Vec<String> {
+    fn list_rows(&self) -> Rc<[String]> {
         let (Some(t), Some(f)) = (&self.tree, &self.folder) else {
-            return Vec::new();
+            return Rc::from([]);
         };
-        let mut entries: Vec<&Entry> = t
-            .children(f)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|p| t.entry(p))
-            .collect();
-        sort_rows(&mut entries, self.sort.0, self.sort.1);
-        entries.into_iter().map(|e| e.path.clone()).collect()
+        self.row_cache
+            .borrow_mut()
+            .rows(t, f, self.sort.0, self.sort.1)
     }
 
     fn apply(&mut self, actions: Vec<Action>) {
@@ -1564,14 +1570,16 @@ impl App {
         let width = ui.available_width();
         let name_width = (width - SIZE_WIDTH - DATE_WIDTH - 24.0).max(120.0);
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-        let targets = self.rows.paths(&rows);
+        // Built only when an action needs it: with all rows selected, a
+        // copy per frame or per row makes the list stutter.
+        let targets = || self.rows.paths(&rows);
         let copy_key = ui.input(|i| {
             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                 || (i.modifiers.command && i.key_pressed(egui::Key::C))
         });
         // With no highlighted row, `explorer_copy` takes the checked items.
         if copy_key && !ui.ctx().egui_wants_keyboard_input() {
-            actions.push(Action::ExplorerCopy(targets.clone()));
+            actions.push(Action::ExplorerCopy(targets()));
         }
         if !ui.ctx().egui_wants_keyboard_input() {
             let (all, none) = ui.input(|i| {
@@ -1587,9 +1595,9 @@ impl App {
                 actions.push(Action::DeselectAll);
             }
         }
-        if let [one] = targets.as_slice()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        if ui.input(|i| i.key_pressed(egui::Key::Enter))
             && !ui.ctx().egui_wants_keyboard_input()
+            && let [one] = targets().as_slice()
         {
             actions.push(Action::Open(one.clone()));
         }
@@ -1679,7 +1687,7 @@ impl App {
                         band_start = band_start.or(press);
                     }
                     if r.dragged() && selected && moved && self.band.is_none() {
-                        actions.push(Action::DragOut(targets.clone()));
+                        actions.push(Action::DragOut(targets()));
                     }
                     if r.clicked() {
                         actions.push(Action::Click {
@@ -1694,13 +1702,13 @@ impl App {
                     if r.double_clicked() {
                         actions.push(Action::Open(path.clone()));
                     }
-                    // The menu acts on the selection if this row is in it.
-                    let menu_targets = if selected {
-                        targets.clone()
-                    } else {
-                        vec![path.clone()]
-                    };
                     r.context_menu(|ui| {
+                        // The menu acts on the selection if this row is in it.
+                        let menu_targets = if selected {
+                            targets()
+                        } else {
+                            vec![path.clone()]
+                        };
                         if e.is_folder {
                             self.folder_menu(ui, path, &menu_targets, actions);
                         } else {
@@ -1885,7 +1893,8 @@ impl App {
         // A copy that runs during a paste stacks its bars below.
         if !pasting || self.copying {
             let (file_fraction, file_text) = self.copy.file_line(now);
-            ui.add(ProgressBar::new(file_fraction).text(file_text));
+            let bar = ProgressBar::new(file_fraction).text(file_text);
+            ui.add(bar.animate(self.copying && self.copy.preparing()));
             match self.copy.scan_text() {
                 Some(text) => ui.add(ProgressBar::new(0.0).animate(true).text(text)),
                 None => {

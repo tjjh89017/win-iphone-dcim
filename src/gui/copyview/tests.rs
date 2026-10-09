@@ -275,3 +275,41 @@ fn copy_end_states() {
     assert_eq!(v.end, Some(EndState::Done));
     assert_eq!(v.fraction(), 1.0);
 }
+
+#[test]
+fn file_bar_shows_preparing_until_the_first_file() {
+    let t0 = Instant::now();
+    let mut v = CopyTracker::new(t0);
+    // No run yet.
+    assert!(!v.preparing());
+    assert_eq!(v.file_line(t0).1, "No file in transfer");
+    v.start(t0);
+    assert!(v.preparing());
+    assert_eq!(v.file_line(t0), (0.0, "Preparing...".into()));
+    // `begin` of the engine: no current file yet.
+    let mut begin = progress(0, 0, None, t0);
+    begin.files_done = 0;
+    v.update(begin, t0);
+    assert_eq!(v.file_line(t0).1, "Preparing...");
+    // The first file starts.
+    v.update(progress(0, 0, Some(("/a/IMG_0001.HEIC", 0)), t0), t0);
+    assert!(!v.preparing());
+    assert!(v.file_line(t0).1.starts_with("IMG_0001.HEIC"));
+}
+
+#[test]
+fn file_bar_leaves_preparing_when_files_settle_or_the_run_ends() {
+    let t0 = Instant::now();
+    let mut v = CopyTracker::new(t0);
+    v.start(t0);
+    // A file that exists settles without a transfer.
+    v.update(progress(0, 0, None, t0), t0);
+    assert!(!v.preparing());
+    assert_eq!(v.file_line(t0).1, "No file in transfer");
+    v.start(t0);
+    v.fail("device gone");
+    assert!(!v.preparing());
+    v.start(t0);
+    v.finish(&CopySummary::default(), t0);
+    assert!(!v.preparing());
+}

@@ -24,9 +24,19 @@ fn by_name(a: &Entry, b: &Entry) -> Ordering {
 /// The name order: case-insensitive first, then case-sensitive. The GUI
 /// file list uses it too.
 pub fn name_order(x: &str, y: &str) -> Ordering {
-    x.to_lowercase()
-        .cmp(&y.to_lowercase())
-        .then_with(|| x.cmp(y))
+    lowercase_order(x, y).then_with(|| x.cmp(y))
+}
+
+/// `x.to_lowercase().cmp(&y.to_lowercase())` without the two allocations.
+/// Only the capital sigma lowercases by context (final `ς`), so a name with
+/// it takes the slow path.
+fn lowercase_order(x: &str, y: &str) -> Ordering {
+    if x.contains('\u{3a3}') || y.contains('\u{3a3}') {
+        return x.to_lowercase().cmp(&y.to_lowercase());
+    }
+    x.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(y.chars().flat_map(char::to_lowercase))
 }
 
 /// Larger value first, `None` last: the `Size` and `Time` order.
