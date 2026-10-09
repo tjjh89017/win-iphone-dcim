@@ -11,6 +11,7 @@ mod cmd;
 mod device_fs;
 mod devpath;
 mod error;
+mod ipc;
 mod model;
 mod paths;
 mod progress;
