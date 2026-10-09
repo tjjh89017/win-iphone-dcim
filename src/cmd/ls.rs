@@ -102,7 +102,9 @@ fn entry(path: &str, name: &str, node: &Node, opts: LsOptions, out: &mut dyn Wri
             "{} {:>12}  {:<19}  {}  [id: {}]",
             if node.is_folder { 'd' } else { '-' },
             size,
-            node.modified.as_deref().unwrap_or("-"),
+            node.modified
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".into()),
             name,
             node.id.display()
         )
@@ -190,11 +192,11 @@ mod tests {
         fs.file(0, "b.txt", b"22");
         fs.file(0, "B.txt", b"4444");
         let n = fs.file(0, "a.txt", b"1");
-        fs.node_mut(n).modified = Some("2024-01-01 00:00:00".into());
+        fs.node_mut(n).modified = Some(crate::model::LocalTime::parse("2024-01-01 00:00:00"));
         let z = fs.folder(0, "Zdir");
-        fs.node_mut(z).modified = Some("2020-01-01 00:00:00".into());
+        fs.node_mut(z).modified = Some(crate::model::LocalTime::parse("2020-01-01 00:00:00"));
         let m = fs.file(0, "m.txt", b"333");
-        fs.node_mut(m).modified = Some("2022-01-01 00:00:00".into());
+        fs.node_mut(m).modified = Some(crate::model::LocalTime::parse("2022-01-01 00:00:00"));
         fs
     }
 

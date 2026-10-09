@@ -69,7 +69,8 @@ mod tests {
             is_folder: folder,
             size,
             content_type: None,
-            modified: modified.map(Into::into),
+            modified: modified.map(crate::model::LocalTime::parse),
+            created: None,
             raw_file_name: None,
         }
     }

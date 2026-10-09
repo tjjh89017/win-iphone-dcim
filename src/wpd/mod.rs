@@ -126,6 +126,7 @@ mod windows_backend {
                 size: None,
                 content_type: None,
                 modified: None,
+                created: None,
                 raw_file_name: None,
             }
         }

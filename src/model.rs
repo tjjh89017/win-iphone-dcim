@@ -42,8 +42,10 @@ pub struct Node {
     pub size: Option<u64>,
     /// `WPD_OBJECT_CONTENT_TYPE` as `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`.
     pub content_type: Option<String>,
-    /// `WPD_OBJECT_DATE_MODIFIED` as `YYYY-MM-DD HH:MM:SS`, device local time.
-    pub modified: Option<String>,
+    /// `WPD_OBJECT_DATE_MODIFIED`, device local time.
+    pub modified: Option<LocalTime>,
+    /// `WPD_OBJECT_DATE_CREATED`, device local time.
+    pub created: Option<LocalTime>,
     /// Raw UTF-16 of the original file name, else of the object name.
     /// `cp` builds the local file name from these units, never from a lossy string.
     /// The string fields above are `None` when their value is not valid UTF-16.
@@ -139,24 +141,63 @@ pub fn human_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// Convert an OLE automation date (`VT_DATE`, days since 1899-12-30) to
-/// `YYYY-MM-DD HH:MM:SS`. Returns `None` for values out of a sane range.
-pub fn ole_date_to_string(date: f64) -> Option<String> {
-    // 1900-01-01 .. 9999-12-31
-    if !date.is_finite() || !(2.0..2_958_466.0).contains(&date) {
-        return None;
+/// A device date and time without a time zone: seconds since
+/// 1970-01-01 00:00:00 on the device's wall clock. WPD gives dates as
+/// `VT_DATE` in device local time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalTime(pub i64);
+
+impl LocalTime {
+    /// Convert an OLE automation date (`VT_DATE`, days since 1899-12-30).
+    /// Returns `None` for values out of a sane range.
+    pub fn from_ole(date: f64) -> Option<Self> {
+        // 1900-01-01 .. 9999-12-31
+        if !date.is_finite() || !(2.0..2_958_466.0).contains(&date) {
+            return None;
+        }
+        const UNIX_EPOCH_OLE_DAYS: f64 = 25_569.0;
+        Some(Self(
+            ((date - UNIX_EPOCH_OLE_DAYS) * 86_400.0).round() as i64
+        ))
     }
-    const UNIX_EPOCH_OLE_DAYS: f64 = 25_569.0;
-    let secs = ((date - UNIX_EPOCH_OLE_DAYS) * 86_400.0).round() as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    Some(format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    ))
+
+    /// (year, month, day, hour, minute, second).
+    pub fn civil(self) -> (i64, u32, u32, u32, u32, u32) {
+        let days = self.0.div_euclid(86_400);
+        let rem = self.0.rem_euclid(86_400) as u32;
+        let (y, m, d) = civil_from_days(days);
+        (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
+    }
+
+    /// Parse `YYYY-MM-DD HH:MM:SS`. Test helper.
+    #[cfg(test)]
+    pub fn parse(s: &str) -> Self {
+        let n: Vec<i64> = s
+            .split(['-', ' ', ':'])
+            .map(|p| p.parse().unwrap())
+            .collect();
+        let days = days_from_civil(n[0], n[1] as u32, n[2] as u32);
+        Self(days * 86_400 + n[3] * 3600 + n[4] * 60 + n[5])
+    }
+}
+
+impl std::fmt::Display for LocalTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (y, m, d, hh, mm, ss) = self.civil();
+        write!(f, "{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}")
+    }
+}
+
+/// (year, month, day) to days since 1970-01-01. Algorithm by Howard Hinnant.
+#[cfg(test)]
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Days since 1970-01-01 to (year, month, day). Algorithm by Howard Hinnant.
@@ -173,6 +214,85 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// What `cp` does with one planned file when its target is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncDecision {
+    /// No local file at the target. Copy it.
+    Copy,
+    /// A local file is at the target and `-f` is set. Copy to a `.part`
+    /// file, then replace the target atomically.
+    Overwrite,
+    /// A local file is at the target. Keep it. `warn` is false with `-n`.
+    SkipExists { warn: bool },
+}
+
+/// How far the size of a copied file is verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verification {
+    /// The byte count matches `WPD_OBJECT_SIZE`.
+    SizeOk,
+    /// The device gave no size. The copy is not verified.
+    SizeUnavailable,
+}
+
+impl std::fmt::Display for Verification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SizeOk => "size-ok",
+            Self::SizeUnavailable => "size-unavailable",
+        })
+    }
+}
+
+/// Result of one committed file transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferReport {
+    pub bytes: u64,
+    pub verification: Verification,
+    /// True if an existing target file was replaced (`-f`).
+    pub replaced: bool,
+    pub elapsed: std::time::Duration,
+}
+
+/// Category of a per-file failure in the `cp` error summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FailureKind {
+    NotFound,
+    /// A folder without `-r`, or a file path with a trailing `/`.
+    Usage,
+    NameUnsafe,
+    Collision,
+    SizeMismatch,
+    TargetExists,
+    Io,
+    Device,
+}
+
+impl std::fmt::Display for FailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "not found",
+            Self::Usage => "usage",
+            Self::NameUnsafe => "name unsafe",
+            Self::Collision => "collision",
+            Self::SizeMismatch => "size mismatch",
+            Self::TargetExists => "target exists",
+            Self::Io => "io",
+            Self::Device => "device",
+        })
+    }
+}
+
+/// Bytes per second as `12.3 MiB/s`.
+pub fn human_speed(bytes: u64, elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        return "- MiB/s".into();
+    }
+    format!("{:.1} MiB/s", bytes as f64 / secs / (1024.0 * 1024.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +307,7 @@ mod tests {
             size: Some(5 * 1024 * 1024 * 1024),
             content_type: Some("9261B03C-3D78-4519-85E3-02C5E1F50BB9".into()),
             modified: None,
+            created: None,
             raw_file_name: Some("IMG_0001.MOV".encode_utf16().collect()),
         }
     }
@@ -262,17 +383,37 @@ mod tests {
         assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 GiB");
     }
 
+    fn ole(date: f64) -> Option<String> {
+        LocalTime::from_ole(date).map(|t| t.to_string())
+    }
+
     #[test]
     fn ole_date_conversion() {
+        assert_eq!(ole(25_569.0).as_deref(), Some("1970-01-01 00:00:00"));
+        assert_eq!(ole(45_658.5).as_deref(), Some("2025-01-01 12:00:00"));
+        assert_eq!(ole(0.0), None);
+        assert_eq!(ole(f64::NAN), None);
+    }
+
+    #[test]
+    fn speed_is_in_mib_per_second() {
+        let d = std::time::Duration::from_secs(2);
+        assert_eq!(human_speed(4 * 1024 * 1024, d), "2.0 MiB/s");
+        assert_eq!(human_speed(1, std::time::Duration::ZERO), "- MiB/s");
         assert_eq!(
-            ole_date_to_string(25_569.0).as_deref(),
-            Some("1970-01-01 00:00:00")
+            Verification::SizeUnavailable.to_string(),
+            "size-unavailable"
         );
-        assert_eq!(
-            ole_date_to_string(45_658.5).as_deref(),
-            Some("2025-01-01 12:00:00")
-        );
-        assert_eq!(ole_date_to_string(0.0), None);
-        assert_eq!(ole_date_to_string(f64::NAN), None);
+    }
+
+    #[test]
+    fn local_time_parse_round_trips() {
+        for s in [
+            "1970-01-01 00:00:00",
+            "2024-02-29 23:59:59",
+            "1999-12-31 08:07:06",
+        ] {
+            assert_eq!(LocalTime::parse(s).to_string(), s);
+        }
     }
 }
