@@ -124,9 +124,6 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             sources,
             dest,
         } => {
-            if *verify == Some(VerifyMode::LocalHash) {
-                return Err(Error::NotImplemented("--verify local-hash"));
-            }
             let fs = wpd::open(cli.device)?;
             let progress = if std::io::stderr().is_terminal() && cli.log_format == LogFormat::Text {
                 ProgressMode::Bar
@@ -145,6 +142,10 @@ fn run(cli: &Cli) -> Result<usize, Error> {
                     OnExists::SkipWarn
                 },
                 progress,
+                local_hash: *verify == Some(VerifyMode::LocalHash),
+                retries: cli.retries,
+                sleep: std::thread::sleep,
+                diagnostic: cli.diagnostic,
             };
             cmd::cp::run(fs.as_ref(), sources, dest, opts, &mut out)?
         }

@@ -199,6 +199,17 @@ impl Progress {
         }
     }
 
+    /// The current file starts again from the first byte after a failure.
+    pub fn restart_file(&mut self) {
+        if let Some(cur) = self.current.as_mut() {
+            cur.bytes = 0;
+            cur.start = Instant::now();
+            if let Some(bar) = &cur.bar {
+                bar.reset();
+            }
+        }
+    }
+
     /// The current file is finished. `ok` is false for a failed transfer.
     pub fn file_end(&mut self, ok: bool) {
         let Some(cur) = self.current.take() else {

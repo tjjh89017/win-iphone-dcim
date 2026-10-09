@@ -113,9 +113,6 @@ pub enum Error {
     #[error("{}: a folder is at the target file path", .0.display())]
     TargetIsFolder(PathBuf),
 
-    #[error("{0} is not implemented until Phase 2")]
-    NotImplemented(&'static str),
-
     #[error("device file name is not valid UTF-16 (units: {units}); refusing to copy it")]
     InvalidDeviceName { units: String },
 
@@ -135,6 +132,13 @@ pub enum Error {
         written: u64,
         expected: u64,
     },
+
+    /// The worker process that owns the WPD COM objects stopped or hung and
+    /// was restarted while it served this request. `RemoteFs` returns it. The
+    /// request can succeed on a new attempt, so it is a transient error.
+    #[error("{context}: the device worker was restarted ({reason})")]
+    #[allow(dead_code)]
+    WorkerRestarted { context: String, reason: String },
 
     #[error("WPD is only available on Windows; this build runs on an unsupported platform")]
     #[cfg_attr(windows, allow(dead_code))]
@@ -177,9 +181,7 @@ impl Error {
             | Self::AccessDenied { .. }
             | Self::DeviceUnavailable { .. }
             | Self::DeviceOpen { .. } => exit::DEVICE,
-            Self::DeviceAmbiguous { .. } | Self::DestNotFolder(_) | Self::NotImplemented(_) => {
-                exit::CLI
-            }
+            Self::DeviceAmbiguous { .. } | Self::DestNotFolder(_) => exit::CLI,
             Self::PathNotFound { .. }
             | Self::NotAFolder(_)
             | Self::FolderNeedsRecursive(_)
@@ -191,7 +193,9 @@ impl Error {
             | Self::OutputExists(_)
             | Self::Io { .. }
             | Self::SizeMismatch { .. } => exit::FILE_FAILED,
-            Self::Wpd { .. } | Self::UnsupportedPlatform => exit::INTERNAL,
+            Self::Wpd { .. } | Self::WorkerRestarted { .. } | Self::UnsupportedPlatform => {
+                exit::INTERNAL
+            }
         }
     }
 }
@@ -203,6 +207,18 @@ impl Error {
             self,
             Self::AccessDenied { .. } | Self::DeviceUnavailable { .. } | Self::UnsupportedPlatform
         )
+    }
+
+    /// True if a new attempt can succeed: the device is busy or gone for a
+    /// moment, an I/O call timed out, a network (SMB) write failed, or the
+    /// worker was restarted. Not found, unsafe names, collisions, a full disk
+    /// and access denied are permanent (SPEC.md section 8).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::DeviceUnavailable { .. } | Self::WorkerRestarted { .. } => true,
+            Self::Io { source, .. } => is_transient_io(source),
+            _ => false,
+        }
     }
 
     /// Category for the `cp` error summary.
@@ -217,6 +233,7 @@ impl Error {
                 FailureKind::TargetExists
             }
             Self::Io { .. } => FailureKind::Io,
+            Self::WorkerRestarted { .. } => FailureKind::Worker,
             _ => FailureKind::Device,
         }
     }
@@ -225,6 +242,36 @@ impl Error {
     pub fn is_broken_pipe(&self) -> bool {
         matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::BrokenPipe)
     }
+}
+
+/// Windows error codes of a failed network or SMB operation, or a timeout.
+const TRANSIENT_OS_ERRORS: [i32; 6] = [
+    59,   // ERROR_UNEXP_NET_ERR
+    64,   // ERROR_NETNAME_DELETED
+    121,  // ERROR_SEM_TIMEOUT
+    1231, // ERROR_NETWORK_UNREACHABLE
+    1236, // ERROR_CONNECTION_ABORTED
+    1460, // ERROR_TIMEOUT
+];
+
+fn is_transient_io(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind as K;
+    if cfg!(windows)
+        && e.raw_os_error()
+            .is_some_and(|c| TRANSIENT_OS_ERRORS.contains(&c))
+    {
+        return true;
+    }
+    matches!(
+        e.kind(),
+        K::TimedOut
+            | K::Interrupted
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::NetworkDown
+            | K::NetworkUnreachable
+            | K::HostUnreachable
+    )
 }
 
 /// Pick the device index. With no selection, exactly one device must be connected.
@@ -317,10 +364,53 @@ mod tests {
             Error::FolderNeedsRecursive("/a".into()).kind(),
             FailureKind::Usage
         );
-        assert_eq!(Error::NotImplemented("--verify").exit_code(), exit::CLI);
         assert_eq!(
             Error::from_hresult("read", 0x8007_048F, String::new(), false).kind(),
             FailureKind::Device
+        );
+    }
+
+    #[test]
+    fn transient_and_permanent_errors() {
+        let io = |kind| Error::Io {
+            context: "write".into(),
+            source: std::io::Error::from(kind),
+        };
+        use std::io::ErrorKind as K;
+        assert!(Error::from_hresult("read", 0x8007_00AA, String::new(), false).is_transient());
+        assert!(
+            Error::WorkerRestarted {
+                context: "read".into(),
+                reason: "timeout".into()
+            }
+            .is_transient()
+        );
+        assert!(io(K::TimedOut).is_transient());
+        assert!(io(K::ConnectionReset).is_transient());
+        assert!(!io(K::StorageFull).is_transient());
+        assert!(!io(K::PermissionDenied).is_transient());
+        assert!(!io(K::NotFound).is_transient());
+        assert!(!Error::from_hresult("read", 0x8007_0005, String::new(), false).is_transient());
+        assert!(
+            !Error::PathNotFound {
+                path: "/a".into(),
+                component: "a".into()
+            }
+            .is_transient()
+        );
+        assert!(
+            !Error::UnsafeFileName {
+                name: "CON".into(),
+                reason: "reserved"
+            }
+            .is_transient()
+        );
+        assert!(
+            !Error::NameCollision {
+                path: "/a".into(),
+                other: "A".into()
+            }
+            .is_transient()
         );
     }
 

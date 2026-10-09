@@ -27,6 +27,16 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
 
+    /// Additional attempts for a file after a transient failure (device
+    /// busy or gone, I/O timeout, network write error). Backoff: 1s, 3s, 10s.
+    #[arg(long, global = true, value_name = "N", default_value_t = 3)]
+    pub retries: u32,
+
+    /// Diagnostic mode: also log the raw device ID. By default logs show
+    /// only a short hash of it.
+    #[arg(long, global = true)]
+    pub diagnostic: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -135,7 +145,9 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Verification mode. Only `size` is available until Phase 2.
+        /// Verification mode. `size` compares sizes with the manifest.
+        /// `local-hash` also stores a BLAKE3 hash of each new copy and checks
+        /// it before a skip.
         #[arg(long, value_enum, value_name = "MODE")]
         verify: Option<VerifyMode>,
 
@@ -318,6 +330,17 @@ mod tests {
     fn fetch_and_object_flag_are_gone() {
         assert!(parse(&["fetch"]).is_err());
         assert!(parse(&["ls", "--object", "o1"]).is_err());
+    }
+
+    #[test]
+    fn retries_and_diagnostic_are_global() {
+        let cli = parse(&["cp", "--retries", "5", "--diagnostic", "/a", "x"]).unwrap();
+        assert_eq!(cli.retries, 5);
+        assert!(cli.diagnostic);
+        let cli = parse(&["devices"]).unwrap();
+        assert_eq!(cli.retries, 3);
+        assert!(!cli.diagnostic);
+        assert!(parse(&["--retries", "-1", "devices"]).is_err());
     }
 
     #[test]

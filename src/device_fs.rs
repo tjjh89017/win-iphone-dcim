@@ -18,6 +18,13 @@ pub trait DeviceFs {
 
     /// Stream the data of `file` to `out` and return the number of bytes written.
     fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64>;
+
+    /// The raw backend device ID, for example the WPD PnP device ID. It is
+    /// sensitive: callers hash it and never log or store the raw value.
+    /// `None` if the backend cannot give one.
+    fn device_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Resolve `path` one level at a time from the root.

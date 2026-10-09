@@ -89,15 +89,20 @@ fn create_part(target: &Path) -> Result<(File, PathBuf)> {
     })
 }
 
-/// Counts written bytes and reports each write to a callback.
+/// Counts written bytes, reports each write to a callback, and optionally
+/// hashes the bytes as they go to disk.
 struct Counting<'a, W> {
     inner: W,
     on_bytes: &'a mut dyn FnMut(u64),
+    hasher: Option<blake3::Hasher>,
 }
 
 impl<W: Write> Write for Counting<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
+        if let Some(h) = self.hasher.as_mut() {
+            h.update(&buf[..n]);
+        }
         (self.on_bytes)(n as u64);
         Ok(n)
     }
@@ -112,17 +117,20 @@ impl<W: Write> Write for Counting<'_, W> {
 /// With `replace` false the commit fails with `Error::OutputExists` if a
 /// file is at `target`. With `replace` true an existing file is replaced
 /// atomically, and only after the new data is complete. On any failure the
-/// `.part` file is removed. `on_bytes` gets the size of each write.
+/// `.part` file is removed. `on_bytes` gets the size of each write. With
+/// `hash` true the report has the BLAKE3 hash of the bytes written, computed
+/// while they stream to disk.
 pub fn transfer(
     fs: &dyn DeviceFs,
     node: &Node,
     target: &Path,
     replace: bool,
+    hash: bool,
     on_bytes: &mut dyn FnMut(u64),
 ) -> Result<TransferReport> {
     let start = Instant::now();
     let (file, part) = create_part(target)?;
-    let result = write_part(fs, node, file, &part, on_bytes).and_then(|bytes| {
+    let result = write_part(fs, node, file, &part, hash, on_bytes).and_then(|(bytes, digest)| {
         let committed = if replace {
             commit_replace(&part, target)
         } else {
@@ -135,15 +143,17 @@ pub fn transfer(
                 source: e,
             },
         })?;
-        Ok(bytes)
+        Ok((bytes, digest))
     });
     match result {
-        Ok(bytes) => Ok(TransferReport {
+        Ok((bytes, digest)) => Ok(TransferReport {
             bytes,
-            verification: match node.size {
-                Some(_) => Verification::SizeOk,
-                None => Verification::SizeUnavailable,
+            verification: match (node.size, digest) {
+                (None, _) => Verification::SizeUnavailable,
+                (Some(_), Some(_)) => Verification::LocalHash,
+                (Some(_), None) => Verification::SizeOk,
             },
+            hash: digest,
             replaced: replace,
             elapsed: start.elapsed(),
         }),
@@ -163,16 +173,19 @@ fn remove_part(part: &Path) {
 }
 
 /// Stream the device data into `file`, flush it, and check the byte count.
+/// Return the byte count and, with `hash`, the BLAKE3 hash.
 fn write_part(
     fs: &dyn DeviceFs,
     node: &Node,
     file: File,
     part: &Path,
+    hash: bool,
     on_bytes: &mut dyn FnMut(u64),
-) -> Result<u64> {
+) -> Result<(u64, Option<[u8; 32]>)> {
     let mut w = Counting {
         inner: file,
         on_bytes,
+        hasher: hash.then(blake3::Hasher::new),
     };
     let written = fs.read_to(node, &mut w)?;
     // A no-op or slow flush on SMB is a known limit, not an error.
@@ -186,7 +199,7 @@ fn write_part(
             written,
             expected,
         }),
-        _ => Ok(written),
+        _ => Ok((written, w.hasher.map(|h| *h.finalize().as_bytes()))),
     }
 }
 
@@ -447,7 +460,7 @@ mod tests {
         let (fs, node) = file_fs(b"hello");
         let target = tmp.path().join("IMG_0001.HEIC");
         let mut seen = 0;
-        let rep = transfer(&fs, &node, &target, false, &mut |n| seen += n).unwrap();
+        let rep = transfer(&fs, &node, &target, false, false, &mut |n| seen += n).unwrap();
         assert_eq!(rep.bytes, 5);
         assert_eq!(seen, 5);
         assert_eq!(rep.verification, Verification::SizeOk);
@@ -456,11 +469,21 @@ mod tests {
     }
 
     #[test]
+    fn transfer_hashes_while_streaming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (fs, node) = file_fs(b"hello");
+        let target = tmp.path().join("IMG_0001.HEIC");
+        let rep = transfer(&fs, &node, &target, false, true, &mut |_| {}).unwrap();
+        assert_eq!(rep.verification, Verification::LocalHash);
+        assert_eq!(rep.hash, Some(*blake3::hash(b"hello").as_bytes()));
+    }
+
+    #[test]
     fn missing_size_is_unverified() {
         let tmp = tempfile::tempdir().unwrap();
         let (fs, mut node) = file_fs(b"hello");
         node.size = None;
-        let rep = transfer(&fs, &node, &tmp.path().join("x"), false, &mut |_| {}).unwrap();
+        let rep = transfer(&fs, &node, &tmp.path().join("x"), false, false, &mut |_| {}).unwrap();
         assert_eq!(rep.verification, Verification::SizeUnavailable);
     }
 
@@ -471,7 +494,7 @@ mod tests {
             let (fs, mut node) = file_fs(b"hello");
             node.size = Some(wrong);
             let target = tmp.path().join("x");
-            let err = transfer(&fs, &node, &target, false, &mut |_| {}).unwrap_err();
+            let err = transfer(&fs, &node, &target, false, false, &mut |_| {}).unwrap_err();
             assert!(
                 matches!(err, Error::SizeMismatch { written: 5, expected, .. } if expected == wrong)
             );
@@ -487,7 +510,7 @@ mod tests {
         fs.fail_read(i, 300, false);
         let node = fs.node_mut(i).clone();
         let target = tmp.path().join("big.mov");
-        assert!(transfer(&fs, &node, &target, false, &mut |_| {}).is_err());
+        assert!(transfer(&fs, &node, &target, false, false, &mut |_| {}).is_err());
         assert!(files_in(tmp.path()).is_empty());
     }
 
@@ -533,7 +556,7 @@ mod tests {
         let (fs, node) = file_fs(b"hello");
         let target = tmp.path().join("IMG_0001.HEIC");
         std::fs::write(&target, b"old").unwrap();
-        let err = transfer(&fs, &node, &target, false, &mut |_| {}).unwrap_err();
+        let err = transfer(&fs, &node, &target, false, false, &mut |_| {}).unwrap_err();
         assert!(matches!(err, Error::OutputExists(_)));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert_eq!(files_in(tmp.path()), ["IMG_0001.HEIC"]);
@@ -570,7 +593,7 @@ mod tests {
         let target = dir.join(format!("照片🎉{}.HEIC", "f".repeat(60)));
         assert!(target.as_os_str().len() > 300);
         let (fs, node) = file_fs(b"long");
-        transfer(&fs, &node, &target, false, &mut |_| {}).unwrap();
+        transfer(&fs, &node, &target, false, false, &mut |_| {}).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"long");
     }
 }

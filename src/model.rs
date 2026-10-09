@@ -214,25 +214,62 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// What `cp` does with one planned file when its target is checked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What `cp` does with one planned file after it checks the target and the
+/// manifest (SPEC.md section 7, incremental rules).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncDecision {
     /// No local file at the target. Copy it.
     Copy,
-    /// A local file is at the target and `-f` is set. Copy to a `.part`
-    /// file, then replace the target atomically.
-    Overwrite,
-    /// A local file is at the target. Keep it. `warn` is false with `-n`.
-    SkipExists { warn: bool },
+    /// A completed manifest record, the target file, and the device agree
+    /// on the size (and on the hash with `--verify local-hash`). Keep it.
+    SkipVerified,
+    /// A local file is at the target and it is not verified. Keep it.
+    /// `warn` is false with `-n`.
+    SkipExists { state: ExistingState, warn: bool },
+    /// A local file is at the target, it is not verified, and `-f` is set.
+    /// Copy to a `.part` file, then replace the target atomically.
+    Overwrite { state: ExistingState },
 }
 
-/// How far the size of a copied file is verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+/// Why an existing target file is not verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExistingState {
+    /// The sizes differ, the manifest record is stale or from another
+    /// device, or the local hash does not match. The text says which.
+    Conflict(String),
+    /// No manifest record, but the size matches the device. The tool does
+    /// not claim that this file is a good backup.
+    UnverifiedExisting,
+    /// A manifest record matches the local file, but the device gives no
+    /// size, so the tool cannot compare.
+    SizeUnavailable,
+}
+
+impl std::fmt::Display for ExistingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(why) => write!(f, "conflict: {why}"),
+            Self::UnverifiedExisting => {
+                f.write_str("unverified-existing: same size, no manifest record")
+            }
+            Self::SizeUnavailable => f.write_str("size-unavailable: the device gives no size"),
+        }
+    }
+}
+
+/// How far a copied file is verified. The serialized names are the
+/// manifest values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verification {
     /// The byte count matches `WPD_OBJECT_SIZE`.
+    #[serde(rename = "size")]
     SizeOk,
+    /// The byte count matches, and a BLAKE3 hash of the local bytes is
+    /// stored. The hash proves local integrity only, not the source.
+    #[serde(rename = "local-hash")]
+    LocalHash,
     /// The device gave no size. The copy is not verified.
+    #[serde(rename = "size-unavailable")]
     SizeUnavailable,
 }
 
@@ -240,6 +277,7 @@ impl std::fmt::Display for Verification {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::SizeOk => "size-ok",
+            Self::LocalHash => "size-ok local-hash",
             Self::SizeUnavailable => "size-unavailable",
         })
     }
@@ -250,6 +288,8 @@ impl std::fmt::Display for Verification {
 pub struct TransferReport {
     pub bytes: u64,
     pub verification: Verification,
+    /// BLAKE3 of the bytes written, when the caller asked for it.
+    pub hash: Option<[u8; 32]>,
     /// True if an existing target file was replaced (`-f`).
     pub replaced: bool,
     pub elapsed: std::time::Duration,
@@ -267,6 +307,8 @@ pub enum FailureKind {
     TargetExists,
     Io,
     Device,
+    /// The device worker was restarted and the retries ran out.
+    Worker,
 }
 
 impl std::fmt::Display for FailureKind {
@@ -280,6 +322,7 @@ impl std::fmt::Display for FailureKind {
             Self::TargetExists => "target exists",
             Self::Io => "io",
             Self::Device => "device",
+            Self::Worker => "worker",
         })
     }
 }
