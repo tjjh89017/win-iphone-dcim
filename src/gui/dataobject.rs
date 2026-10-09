@@ -86,7 +86,7 @@ fn format_name(cf: u16) -> String {
 }
 
 fn log_request(call: &str, fmt: &FORMATETC, result: HRESULT) {
-    tracing::info!(
+    tracing::debug!(
         "paste: {call} {} aspect={} lindex={} tymed={:#x} -> {:#010x}",
         format_name(fmt.cfFormat),
         fmt.dwAspect,
@@ -307,7 +307,7 @@ impl IDataObject_Impl for DataObject_Impl {
         }) else {
             return E_POINTER;
         };
-        tracing::info!(
+        tracing::debug!(
             "paste: GetCanonicalFormatEtc {}",
             format_name(input.cfFormat)
         );
@@ -337,7 +337,7 @@ impl IDataObject_Impl for DataObject_Impl {
     }
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> Result<IEnumFORMATETC> {
-        tracing::info!("paste: EnumFormatEtc direction={dwdirection}");
+        tracing::debug!("paste: EnumFormatEtc direction={dwdirection}");
         if dwdirection != DATADIR_GET.0 as u32 {
             return Err(E_NOTIMPL.into());
         }
@@ -383,7 +383,7 @@ impl IDataObjectAsyncCapability_Impl for DataObject_Impl {
     }
 
     fn GetAsyncMode(&self) -> Result<BOOL> {
-        tracing::info!("paste: GetAsyncMode");
+        tracing::debug!("paste: GetAsyncMode");
         Ok(self.async_mode.load(Ordering::SeqCst).into())
     }
 
@@ -396,7 +396,7 @@ impl IDataObjectAsyncCapability_Impl for DataObject_Impl {
     }
 
     fn InOperation(&self) -> Result<BOOL> {
-        tracing::info!("paste: InOperation");
+        tracing::debug!("paste: InOperation");
         Ok(self.in_operation.load(Ordering::SeqCst).into())
     }
 

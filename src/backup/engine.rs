@@ -687,7 +687,7 @@ fn differ(a: &Option<String>, b: &Option<String>) -> bool {
 /// A failure is logged and does not fail the copy.
 fn preserve_times(target: &Path, node: &Node) {
     if node.modified.is_none() {
-        tracing::info!(
+        tracing::debug!(
             "{}: the device gives no modified date; the copy time stays",
             target.display()
         );

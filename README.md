@@ -217,6 +217,18 @@ Example `tree` output:
 
 Start `win-iphone-dcim-gui.exe`. No console window opens.
 
+To capture a log, open a cmd window and run:
+
+```
+set RUST_LOG=win_iphone_dcim=debug
+set WIN_IPHONE_DCIM_LOG_FILE=%CD%\gui.log
+win-iphone-dcim-gui.exe
+```
+
+Start the GUI from that same cmd window, so it gets the two variables. The
+GUI and its worker append their logs to `gui.log`. `2> gui.log` does not
+work: cmd does not pass a redirection to a GUI program.
+
 The GUI needs `win-iphone-dcim.exe` in the same folder: it starts that file
 as its device worker, as the CLI does. If the file is missing, the GUI shows
 an error and cannot open a device.
@@ -224,7 +236,7 @@ an error and cannot open a device.
 The window:
 
 - Menu bar: File (Refresh devices, Destination..., Copy to folder, Copy
-  to..., Cancel copy, Overwrite existing, Open, Open cache folder,
+  to..., Copy to <destination>, Cancel copy, Overwrite existing, Open, Open cache folder,
   Properties, Clear cache, Clear cache on exit, Exit), Edit (Select all,
   Deselect all, Check all, Uncheck all, Copy (paste in Explorer),
   Preferences...), View (Back, Forward, Up, Refresh folder, sort column and
@@ -296,8 +308,8 @@ Right-click menus:
 
 | Where | Items |
 | --- | --- |
-| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (paste in Explorer), Check, Uncheck, Properties |
-| A folder (list or tree) | Open, Copy to..., Copy (paste in Explorer), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
+| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to <destination>, Copy to..., Copy (paste in Explorer), Check, Uncheck, Properties |
+| A folder (list or tree) | Open, Copy to <destination>, Copy to..., Copy (paste in Explorer), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
 | Empty space in the list | Refresh, Select all, Deselect all |
 
 In the list, a menu on a selected row acts on all selected rows. Open is
@@ -311,7 +323,11 @@ checkbox). The copy starts at the deepest folder that holds all checked
 items and copies only the checked items below it. For example, checked
 items in `202601_a` and `202601_b` go to `DEST\DCIM\202601_a` and
 `DEST\DCIM\202601_b`. "Copy to..." asks for a folder and copies the
-selected items, like `cp -r -p <items> DEST`. Both use the incremental
+selected items, like `cp -r -p <items> DEST`; the picker opens at the
+destination, and the picked folder becomes the new destination. "Copy to
+<destination>" (named after the last folder of the destination, enabled when
+a destination is set and no copy runs) copies the selected items into the
+destination without a dialog. All three use the incremental
 rules of `cp`, so a second copy skips the files that exist with the same
 size. With `manifest = true` in the config they write the manifest, like
 `cp --manifest`. Cancel
