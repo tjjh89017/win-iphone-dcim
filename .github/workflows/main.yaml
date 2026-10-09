@@ -9,8 +9,8 @@
 # cross-compiles aarch64-pc-windows-msvc with the MSVC toolchain on the runner. Tests that need WPD or a real iPhone are
 # manual and do not run here.
 #
-# The lint, test, and build jobs run in parallel. Build runs even when lint or
-# test fails, so the artifact always uploads.
+# The lint and test jobs run first, in parallel. The build job runs after both
+# pass.
 
 name: main
 
@@ -63,6 +63,9 @@ jobs:
 
   build:
     name: Build (${{ matrix.artifact }})
+    needs:
+      - lint
+      - test
     runs-on: windows-latest
     strategy:
       fail-fast: false
