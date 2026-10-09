@@ -1,0 +1,729 @@
+//! The device thread of the GUI.
+//!
+//! One thread owns the `DeviceFs` and every object that it holds (the
+//! worker process pipes, or COM objects without isolation). The UI thread
+//! sends a `Request` and gets `Reply` values back. It never calls the
+//! device itself and never waits for the device thread.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+use super::cache;
+use super::selection::{Entry, SelectedFs, Selection};
+use crate::backup::engine::{self, CopyOptions, CopySummary, Note, OnExists, ProgressSink};
+use crate::backup::manifest::device_key;
+use crate::backup::transfer::transfer;
+use crate::device_fs::{self, DeviceFs};
+use crate::devpath::DevicePath;
+use crate::error::{Error, Result};
+use crate::model::{DeviceInfo, Node};
+use crate::paths::to_verbatim;
+use crate::supervisor::{self, WorkerCommand};
+
+/// The fastest rate of progress replies.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How the device thread finds and opens devices.
+pub trait Connector: Send {
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>>;
+    fn open(&self, index: usize) -> Result<Box<dyn DeviceFs>>;
+}
+
+/// Devices in a worker process: the CLI program next to the GUI program.
+pub struct WorkerConnector {
+    pub worker: WorkerCommand,
+    pub timeout: Duration,
+}
+
+impl Connector for WorkerConnector {
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+        supervisor::list_devices(&self.worker, self.timeout)
+    }
+
+    fn open(&self, index: usize) -> Result<Box<dyn DeviceFs>> {
+        device_fs::open_remote(self.worker.clone(), Some(index), self.timeout)
+    }
+}
+
+pub enum Request {
+    ListDevices,
+    Open {
+        index: usize,
+    },
+    /// List the folder at a device path.
+    List {
+        path: String,
+    },
+    /// Copy into the existing folder `dest`.
+    Copy {
+        what: CopySet,
+        dest: PathBuf,
+        force: bool,
+    },
+    /// Download a file to the cache for opening.
+    Download {
+        path: String,
+    },
+    /// Delete the cache folder of the open device.
+    ClearCache,
+}
+
+/// What a copy copies.
+pub enum CopySet {
+    /// The checked objects, like `cp -r -p <copy root> DEST` limited to them.
+    Checked(Selection),
+    /// These device paths, like `cp -r -p <paths>... DEST`.
+    Paths(Vec<String>),
+}
+
+/// An open device.
+#[derive(Debug, Clone)]
+pub struct Opened {
+    pub root: Entry,
+    /// The cache folder of this device. `None` if no cache folder is known.
+    pub cache_dir: Option<PathBuf>,
+}
+
+/// Progress of a running copy.
+#[derive(Debug, Clone, Default)]
+pub struct CopyProgress {
+    pub files_found: u64,
+    pub files_done: u64,
+    pub bytes_found: u64,
+    pub bytes_done: u64,
+    /// The planner still lists folders, so the totals can grow.
+    pub scanning: bool,
+    pub current: Option<CurrentFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CurrentFile {
+    pub source: String,
+    pub size: Option<u64>,
+    pub bytes: u64,
+    pub started: Instant,
+}
+
+pub enum Reply {
+    Devices(std::result::Result<Vec<DeviceInfo>, String>),
+    Opened(std::result::Result<Opened, String>),
+    Listed {
+        path: String,
+        result: std::result::Result<Vec<Entry>, String>,
+    },
+    CopyProgress(CopyProgress),
+    CopyNote(Note, String),
+    CopyDone(std::result::Result<CopySummary, String>),
+    DownloadProgress {
+        path: String,
+        bytes: u64,
+        size: Option<u64>,
+    },
+    /// The file is complete at `local`. Only now can it be opened.
+    Downloaded {
+        path: String,
+        local: PathBuf,
+        reused: bool,
+    },
+    DownloadFailed {
+        path: String,
+        error: String,
+    },
+    CacheCleared(std::result::Result<PathBuf, String>),
+    /// The result of opening a file with its default application.
+    ShellOpened {
+        local: PathBuf,
+        result: std::result::Result<(), String>,
+    },
+}
+
+/// The UI side of the device thread.
+pub struct DeviceHandle {
+    tx: Sender<Request>,
+    pub rx: Receiver<Reply>,
+    /// For replies from other helper threads, for example the shell open.
+    pub reply_tx: Sender<Reply>,
+    /// Set to stop a copy after the current file.
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl DeviceHandle {
+    /// Start the device thread. `wake` runs after each reply, so the UI
+    /// can repaint.
+    pub fn spawn(
+        connector: Box<dyn Connector>,
+        cache_base: Option<PathBuf>,
+        wake: Box<dyn Fn() + Send>,
+    ) -> Self {
+        let (tx, requests) = mpsc::channel();
+        let (reply_tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = Out {
+            tx: reply_tx.clone(),
+            wake,
+        };
+        let thread_cancel = cancel.clone();
+        // The thread ends when the handle drops the request channel. Nobody
+        // joins it, so a hung device call cannot block the window. The
+        // `DeviceFs` is created on this thread and never leaves it.
+        std::thread::Builder::new()
+            .name("device".into())
+            .spawn(move || {
+                let mut thread = DeviceThread {
+                    connector,
+                    cache_base,
+                    fs: None,
+                    nodes: HashMap::new(),
+                    device_key: None,
+                    out,
+                    cancel: thread_cancel,
+                };
+                while let Ok(request) = requests.recv() {
+                    thread.handle(request);
+                }
+            })
+            .expect("start the device thread");
+        Self {
+            tx,
+            rx,
+            reply_tx,
+            cancel,
+        }
+    }
+
+    pub fn send(&self, request: Request) {
+        // A send fails only if the device thread is gone; the UI then gets
+        // no reply and shows its last state.
+        let _ = self.tx.send(request);
+    }
+}
+
+impl Drop for DeviceHandle {
+    fn drop(&mut self) {
+        // A running copy stops after the current file.
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+struct Out {
+    tx: Sender<Reply>,
+    wake: Box<dyn Fn() + Send>,
+}
+
+impl Out {
+    fn send(&self, reply: Reply) {
+        let _ = self.tx.send(reply);
+        (self.wake)();
+    }
+}
+
+struct DeviceThread {
+    connector: Box<dyn Connector>,
+    cache_base: Option<PathBuf>,
+    fs: Option<Box<dyn DeviceFs>>,
+    /// Nodes from earlier listings, by device path.
+    nodes: HashMap<String, Node>,
+    /// Hashed device ID of the open device.
+    device_key: Option<String>,
+    out: Out,
+    cancel: Arc<AtomicBool>,
+}
+
+fn text(e: Error) -> String {
+    e.to_string()
+}
+
+impl DeviceThread {
+    fn handle(&mut self, request: Request) {
+        match request {
+            Request::ListDevices => {
+                let result = self.connector.list_devices().map_err(text);
+                self.out.send(Reply::Devices(result));
+            }
+            Request::Open { index } => {
+                let result = self.open(index).map_err(text);
+                self.out.send(Reply::Opened(result));
+            }
+            Request::List { path } => {
+                let result = self.list(&path).map_err(text);
+                self.out.send(Reply::Listed { path, result });
+            }
+            Request::Copy { what, dest, force } => {
+                let result = self.copy(&what, &dest, force).map_err(text);
+                self.out.send(Reply::CopyDone(result));
+            }
+            Request::Download { path } => match self.download(&path) {
+                Ok((local, reused)) => self.out.send(Reply::Downloaded {
+                    path,
+                    local,
+                    reused,
+                }),
+                Err(e) => self.out.send(Reply::DownloadFailed {
+                    path,
+                    error: e.to_string(),
+                }),
+            },
+            Request::ClearCache => {
+                let result = self
+                    .device_cache()
+                    .and_then(|dir| cache::clear(&dir).map(|()| dir))
+                    .map_err(text);
+                self.out.send(Reply::CacheCleared(result));
+            }
+        }
+    }
+
+    fn open(&mut self, index: usize) -> Result<Opened> {
+        self.fs = None;
+        self.nodes.clear();
+        let fs = self.connector.open(index)?;
+        let root = fs.root();
+        self.device_key = fs.device_id().map(|raw| device_key(&raw));
+        self.nodes.insert("/".into(), root.clone());
+        self.fs = Some(fs);
+        Ok(Opened {
+            root: Entry::new(None, &root),
+            cache_dir: self.device_cache().ok(),
+        })
+    }
+
+    fn fs(&self) -> Result<&dyn DeviceFs> {
+        self.fs.as_deref().ok_or(Error::NoDevice)
+    }
+
+    /// The node at `path`: from an earlier listing, else resolved again.
+    fn node(&self, path: &str) -> Result<Node> {
+        if let Some(node) = self.nodes.get(path) {
+            return Ok(node.clone());
+        }
+        let parsed = DevicePath::parse(path).map_err(|_| Error::PathNotFound {
+            path: path.to_owned(),
+            component: path.to_owned(),
+        })?;
+        device_fs::resolve(self.fs()?, &parsed)
+    }
+
+    fn list(&mut self, path: &str) -> Result<Vec<Entry>> {
+        let dir = self.node(path)?;
+        let children = self.fs()?.list(&dir)?;
+        let mut entries = Vec::with_capacity(children.len());
+        for child in children {
+            let entry = Entry::new(Some(path), &child);
+            self.nodes.entry(entry.path.clone()).or_insert(child);
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn copy(&self, what: &CopySet, dest: &Path, force: bool) -> Result<CopySummary> {
+        let fs = self.fs()?;
+        let (paths, selection) = match what {
+            CopySet::Checked(selection) => match selection.copy_root() {
+                Some(root) => (vec![root], Some(selection)),
+                None => return Ok(CopySummary::default()),
+            },
+            CopySet::Paths(paths) => (paths.clone(), None),
+        };
+        let sources = paths
+            .iter()
+            .map(|p| {
+                DevicePath::parse(p).map_err(|_| Error::PathNotFound {
+                    path: p.clone(),
+                    component: p.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let opts = CopyOptions {
+            recursive: true,
+            preserve: true,
+            on_exists: if force {
+                OnExists::Overwrite
+            } else {
+                OnExists::SkipWarn
+            },
+            ..CopyOptions::default()
+        };
+        let mut sink = ChannelSink::new(&self.out, &self.cancel);
+        let mut out = std::io::sink();
+        match selection {
+            Some(selection) => {
+                let view = SelectedFs::new(fs, selection);
+                engine::run(&view, &sources, dest, opts, &mut sink, &mut out)
+            }
+            None => engine::run(fs, &sources, dest, opts, &mut sink, &mut out),
+        }
+    }
+
+    fn device_cache(&self) -> Result<PathBuf> {
+        let base = self.cache_base.clone().map_or_else(cache::base_dir, Ok)?;
+        Ok(cache::device_dir(&base, self.device_key.as_deref()))
+    }
+
+    /// Download `path` to the cache, or reuse a complete cached copy.
+    fn download(&self, path: &str) -> Result<(PathBuf, bool)> {
+        let node = self.node(path)?;
+        if node.is_folder {
+            return Err(Error::NotAFolder(path.to_owned()));
+        }
+        let local = cache::file_path(&self.device_cache()?, path)?;
+        if cache::is_fresh(&local, node.size) {
+            return Ok((local, true));
+        }
+        let target = to_verbatim(&local);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+                context: format!("create the cache folder {}", parent.display()),
+                source,
+            })?;
+        }
+        let mut bytes = 0;
+        let mut last = Instant::now();
+        let out = &self.out;
+        let size = node.size;
+        transfer(self.fs()?, &node, &target, true, false, &mut |n| {
+            bytes += n;
+            if last.elapsed() >= PROGRESS_INTERVAL {
+                last = Instant::now();
+                out.send(Reply::DownloadProgress {
+                    path: path.to_owned(),
+                    bytes,
+                    size,
+                });
+            }
+        })?;
+        Ok((local, false))
+    }
+}
+
+/// Engine progress as replies, at most one progress reply per interval.
+struct ChannelSink<'a> {
+    out: &'a Out,
+    cancel: &'a AtomicBool,
+    progress: CopyProgress,
+    last: Instant,
+}
+
+impl<'a> ChannelSink<'a> {
+    fn new(out: &'a Out, cancel: &'a AtomicBool) -> Self {
+        Self {
+            out,
+            cancel,
+            progress: CopyProgress {
+                scanning: true,
+                ..CopyProgress::default()
+            },
+            last: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, force: bool) {
+        if force || self.last.elapsed() >= PROGRESS_INTERVAL {
+            self.last = Instant::now();
+            self.out.send(Reply::CopyProgress(self.progress.clone()));
+        }
+    }
+}
+
+impl ProgressSink for ChannelSink<'_> {
+    fn found(&mut self, size: Option<u64>) {
+        self.progress.files_found += 1;
+        self.progress.bytes_found += size.unwrap_or(0);
+        self.push(false);
+    }
+
+    fn settled(&mut self, size: Option<u64>) {
+        self.progress.files_done += 1;
+        self.progress.bytes_done += size.unwrap_or(0);
+        self.push(false);
+    }
+
+    fn file_start(&mut self, source: &str, size: Option<u64>) {
+        self.progress.current = Some(CurrentFile {
+            source: source.to_owned(),
+            size,
+            bytes: 0,
+            started: Instant::now(),
+        });
+        self.push(true);
+    }
+
+    fn bytes(&mut self, n: u64) {
+        if let Some(c) = self.progress.current.as_mut() {
+            c.bytes += n;
+        }
+        self.push(false);
+    }
+
+    fn restart_file(&mut self) {
+        if let Some(c) = self.progress.current.as_mut() {
+            c.bytes = 0;
+            c.started = Instant::now();
+        }
+        self.push(true);
+    }
+
+    fn file_end(&mut self, _ok: bool) {
+        if let Some(c) = self.progress.current.take() {
+            self.progress.files_done += 1;
+            self.progress.bytes_done += c.size.unwrap_or(c.bytes);
+        }
+        self.push(true);
+    }
+
+    fn scan_done(&mut self) {
+        self.progress.scanning = false;
+        self.push(true);
+    }
+
+    fn note(&mut self, note: Note, text: &str) {
+        self.out.send(Reply::CopyNote(note, text.to_owned()));
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_fs::fake::{self, dcim};
+    use crate::gui::selection::Tree;
+
+    struct FakeConnector;
+
+    impl Connector for FakeConnector {
+        fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+            Ok(fake::devices())
+        }
+
+        fn open(&self, _index: usize) -> Result<Box<dyn DeviceFs>> {
+            Ok(Box::new(dcim()))
+        }
+    }
+
+    fn handle(cache: &Path) -> DeviceHandle {
+        DeviceHandle::spawn(
+            Box::new(FakeConnector),
+            Some(cache.to_path_buf()),
+            Box::new(|| {}),
+        )
+    }
+
+    fn next(h: &DeviceHandle) -> Reply {
+        h.rx.recv_timeout(Duration::from_secs(10)).unwrap()
+    }
+
+    /// Replies until the first one that `done` accepts. Return all of them.
+    fn until(h: &DeviceHandle, done: impl Fn(&Reply) -> bool) -> Vec<Reply> {
+        let mut all = Vec::new();
+        loop {
+            let r = next(h);
+            let stop = done(&r);
+            all.push(r);
+            if stop {
+                return all;
+            }
+        }
+    }
+
+    fn open(h: &DeviceHandle) -> Tree {
+        h.send(Request::ListDevices);
+        assert!(matches!(next(h), Reply::Devices(Ok(d)) if d.len() == 1));
+        h.send(Request::Open { index: 0 });
+        let Reply::Opened(Ok(opened)) = next(h) else {
+            panic!("open failed");
+        };
+        assert_eq!(opened.root.path, "/");
+        assert!(opened.cache_dir.is_some());
+        Tree::new(opened.root)
+    }
+
+    fn load(h: &DeviceHandle, tree: &mut Tree, path: &str) {
+        h.send(Request::List { path: path.into() });
+        match next(h) {
+            Reply::Listed {
+                path: p,
+                result: Ok(entries),
+            } => {
+                assert_eq!(p, path);
+                tree.set_children(path, entries);
+            }
+            _ => panic!("list failed"),
+        }
+    }
+
+    #[test]
+    fn browse_and_copy_the_checked_set() {
+        let cache = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        let mut tree = open(&h);
+        for p in [
+            "/",
+            "/Internal Storage",
+            "/Internal Storage/DCIM",
+            "/Internal Storage/DCIM/202601_a",
+        ] {
+            load(&h, &mut tree, p);
+        }
+        let names: Vec<&str> = tree
+            .children("/Internal Storage/DCIM/202601_a")
+            .unwrap()
+            .iter()
+            .map(|p| tree.entry(p).unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, ["IMG_0001.HEIC", "IMG_0002.MOV"]);
+        // 202601_b is not loaded; checking it means all of it.
+        tree.set_checked("/Internal Storage/DCIM/202601_b", true);
+        tree.set_checked("/Internal Storage/DCIM/202601_a/IMG_0002.MOV", true);
+        h.send(Request::Copy {
+            what: CopySet::Checked(tree.selection()),
+            dest: dest.path().to_path_buf(),
+            force: false,
+        });
+        let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
+        let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+            panic!("copy failed");
+        };
+        assert_eq!((summary.copied, summary.failed), (2, 0));
+        let d = dest.path().join("DCIM");
+        assert_eq!(
+            std::fs::read(d.join("202601_b/IMG_0001.HEIC")).unwrap(),
+            b"heic-b"
+        );
+        assert_eq!(
+            d.join("202601_a/IMG_0002.MOV").metadata().unwrap().len(),
+            2048
+        );
+        assert!(!d.join("202601_a/IMG_0001.HEIC").exists());
+        assert!(
+            dest.path()
+                .join(".win-iphone-dcim/manifest.jsonl")
+                .is_file()
+        );
+        let last_progress = replies.iter().rev().find_map(|r| match r {
+            Reply::CopyProgress(p) => Some(p.clone()),
+            _ => None,
+        });
+        let p = last_progress.unwrap();
+        assert_eq!((p.files_found, p.files_done, p.scanning), (2, 2, false));
+        assert_eq!(p.bytes_done, 2048 + 6);
+
+        // A second copy skips the verified files.
+        h.send(Request::Copy {
+            what: CopySet::Checked(tree.selection()),
+            dest: dest.path().to_path_buf(),
+            force: false,
+        });
+        let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
+        let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+            panic!("copy failed");
+        };
+        assert_eq!((summary.copied, summary.skipped), (0, 2));
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, Reply::CopyNote(Note::Skip, t) if t.ends_with("verified")))
+        );
+    }
+
+    #[test]
+    fn copy_to_copies_the_given_paths() {
+        let cache = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        open(&h);
+        h.send(Request::Copy {
+            what: CopySet::Paths(vec![
+                "/Internal Storage/DCIM/202601_a".into(),
+                "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC".into(),
+            ]),
+            dest: dest.path().to_path_buf(),
+            force: false,
+        });
+        let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
+        let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+            panic!("copy failed");
+        };
+        assert_eq!((summary.copied, summary.failed), (3, 0));
+        assert!(dest.path().join("202601_a/IMG_0002.MOV").is_file());
+        assert_eq!(
+            std::fs::read(dest.path().join("IMG_0001.HEIC")).unwrap(),
+            b"heic-b"
+        );
+    }
+
+    #[test]
+    fn cancel_before_copy_copies_nothing() {
+        let cache = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        let mut tree = open(&h);
+        load(&h, &mut tree, "/");
+        tree.set_checked("/Internal Storage", true);
+        h.cancel.store(true, Ordering::SeqCst);
+        h.send(Request::Copy {
+            what: CopySet::Checked(tree.selection()),
+            dest: dest.path().to_path_buf(),
+            force: false,
+        });
+        let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
+        let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+            panic!("copy failed");
+        };
+        assert!(summary.cancelled);
+        assert_eq!(summary.copied, 0);
+    }
+
+    #[test]
+    fn download_goes_to_the_cache_and_is_reused() {
+        let cache = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        let mut tree = open(&h);
+        load(&h, &mut tree, "/");
+        let path = "/Internal Storage/DCIM/202601_a/IMG_0002.MOV";
+        h.send(Request::Download { path: path.into() });
+        let Reply::Downloaded {
+            local,
+            reused,
+            path: p,
+        } = until(&h, |r| !matches!(r, Reply::DownloadProgress { .. }))
+            .pop()
+            .unwrap()
+        else {
+            panic!("download failed");
+        };
+        assert_eq!(p, path);
+        assert!(!reused);
+        // The fake gives no device ID.
+        assert_eq!(
+            local,
+            cache
+                .path()
+                .join("unknown-device/Internal Storage/DCIM/202601_a/IMG_0002.MOV")
+        );
+        assert_eq!(local.metadata().unwrap().len(), 2048);
+        h.send(Request::Download { path: path.into() });
+        assert!(matches!(next(&h), Reply::Downloaded { reused: true, .. }));
+        h.send(Request::ClearCache);
+        assert!(matches!(next(&h), Reply::CacheCleared(Ok(_))));
+        assert!(!local.exists());
+        h.send(Request::Download {
+            path: "/Internal Storage/DCIM".into(),
+        });
+        assert!(matches!(next(&h), Reply::DownloadFailed { .. }));
+    }
+
+    #[test]
+    fn requests_without_a_device_fail_cleanly() {
+        let cache = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        h.send(Request::List { path: "/".into() });
+        assert!(matches!(next(&h), Reply::Listed { result: Err(_), .. }));
+    }
+}

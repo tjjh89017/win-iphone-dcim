@@ -15,6 +15,7 @@ pub mod cmd;
 pub mod device_fs;
 pub mod devpath;
 pub mod error;
+pub mod gui;
 pub mod ipc;
 pub mod model;
 pub mod paths;

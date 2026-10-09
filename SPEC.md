@@ -49,7 +49,7 @@ The key point is to **preserve the logical folders that WPD exposes**. The tool 
 - Do not guarantee support for originals that iCloud did not download to the device yet.
 - Do not read from the same iPhone with concurrent threads. Stability has priority.
 - Do not claim portable, reliable offset resume on a WPD `IStream` during a transfer. In the first version, a file retry starts again from the first byte.
-- Do not build the GUI before Phase 3 is complete.
+- Do not build the GUI before Phase 3 is complete. (Satisfied: Phase 3 is complete, and Phase 4 has started.)
 
 ## 2. Technical assumptions to verify first (Go / No-Go)
 
@@ -122,7 +122,10 @@ win-iphone-dcim/
 ├── scripts/
 ├── .github/
 ├── src/
-│   ├── main.rs
+│   ├── lib.rs                 # library: declares the modules
+│   ├── main.rs                # CLI entry point (and the hidden worker)
+│   ├── bin/
+│   │   └── gui.rs             # GUI entry point: win-iphone-dcim-gui
 │   ├── cli.rs                 # CLI arguments
 │   ├── model.rs              # Device, FileEntry, SyncDecision, TransferReport
 │   ├── error.rs
@@ -146,18 +149,25 @@ win-iphone-dcim/
 │   │   └── stream.rs          # IPortableDeviceResources::GetStream
 │   ├── backup/
 │   │   ├── mod.rs
+│   │   ├── engine.rs          # copy executor with a ProgressSink (CLI bars, GUI events)
 │   │   ├── planner.rs         # path mapping, cp/rsync DEST rules, lazy folder walk
 │   │   ├── transfer.rs        # .part copy + validation + atomic rename
 │   │   ├── manifest.rs        # JSONL load/append/reconcile
 │   │   └── paths.rs           # Windows filename validation, case collisions
 │   ├── supervisor.rs          # parent side: worker lifecycle, watchdog, restart
 │   ├── ipc.rs                 # JSONL control messages and the data pipe
-│   └── gui/                   # planned; Phase 4 only; see section 10
+│   └── gui/                   # Phase 4; see section 10
+│       ├── mod.rs
+│       ├── app.rs             # egui window (Windows only); UI thread
+│       ├── device.rs          # device thread; owns the DeviceFs
+│       ├── selection.rs       # tree model, check marks, list selection
+│       ├── cache.rs           # open-file cache paths
+│       └── shell.rs           # ShellExecuteW and Explorer (Windows only)
 └── tests/
     └── e2e.rs                 # runs the built executable against the fake device
 ```
 
-You can start with a single binary. Start the worker with the hidden `worker` subcommand. The parent and the worker exchange commands and results as JSONL through stdin/stdout. Use stderr only for logs. This rule keeps noise out of the protocol output.
+The crate is a library with two binaries: the CLI and the GUI. The GUI starts the CLI program in its own folder as the worker. Start the worker with the hidden `worker` subcommand. The parent and the worker exchange commands and results as JSONL through stdin/stdout. Use stderr only for logs. This rule keeps noise out of the protocol output.
 
 ## 5. CLI interface
 
@@ -397,19 +407,19 @@ Verification scope as of 2026-10-09: no real-device test has run yet. All tests 
 
 Goal: give the user a window to select folders and files from the DCIM tree, then copy them with the normal Windows copy flow. The user can paste the selection into File Explorer. Explorer then shows its own progress dialog and its own "Replace or Skip Files" dialog.
 
-- [ ] Build the GUI as a separate binary or a `gui` subcommand that reuses the CLI core. Do not duplicate the WPD code.
-- [ ] Show the DCIM tree with checkboxes. Show the file name, the size, and the folder path. Do not show the WPD object ID.
-- [ ] Let the user open a folder in the tree and browse its files, as in a file manager. Show a list view with name, size, and date.
-- [ ] Open a file with the Windows default application when the user double-clicks it. Windows applications cannot read a WPD stream directly. Download the file first to a local cache folder. Then call `ShellExecuteW` with the `open` verb on the cached file.
-- [ ] Put the cache in `%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<relative path>`. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
-- [ ] Give the cached file its original file name and extension. Then Windows picks the correct application for HEIC, MOV, DNG, and other types.
-- [ ] Do not open the file from the GUI before the download is complete. A partial file can crash the viewer.
+- [x] Build the GUI as a separate binary or a `gui` subcommand that reuses the CLI core. Do not duplicate the WPD code.
+- [x] Show the DCIM tree with checkboxes. Show the file name, the size, and the folder path. Do not show the WPD object ID.
+- [x] Let the user open a folder in the tree and browse its files, as in a file manager. Show a list view with name, size, and date.
+- [x] Open a file with the Windows default application when the user double-clicks it. Windows applications cannot read a WPD stream directly. Download the file first to a local cache folder. Then call `ShellExecuteW` with the `open` verb on the cached file.
+- [x] Put the cache in `%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<relative path>`. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
+- [x] Give the cached file its original file name and extension. Then Windows picks the correct application for HEIC, MOV, DNG, and other types.
+- [x] Do not open the file from the GUI before the download is complete. A partial file can crash the viewer.
 - [ ] Implement a COM `IDataObject` that offers `CFSTR_FILEDESCRIPTORW` and `CFSTR_FILECONTENTS`. Give each `FILEDESCRIPTORW` the relative path under `DCIM`, the `FD_FILESIZE` flag with the WPD size, and `FD_ATTRIBUTES` for folders. Supply each `CFSTR_FILECONTENTS` as an `IStream` that reads from the WPD stream on demand.
 - [ ] Put the `IDataObject` on the clipboard with `OleSetClipboard`. Also support drag and drop with `DoDragDrop`. Explorer pulls the data from this process, so the process must stay open until the paste completes.
 - [ ] Serve one `IStream` at a time from the worker process over IPC. Keep all WPD COM objects in the worker. Do not pass COM pointers to the GUI process.
 - [ ] Let Explorer handle conflicts. Do not add a second conflict dialog.
-- [ ] Add an in-app copy mode that uses the Phase 1/2 transfer engine and the manifest. Use it when the user wants verification and an incremental copy. The Explorer paste mode has no manifest and no verification.
-- [ ] Use a Rust GUI toolkit that compiles with the MSVC target and does not need a web runtime. Evaluate `egui`/`eframe` first. Evaluate native Win32 controls second.
+- [x] Add an in-app copy mode that uses the Phase 1/2 transfer engine and the manifest. Use it when the user wants verification and an incremental copy. The Explorer paste mode has no manifest and no verification.
+- [x] Use a Rust GUI toolkit that compiles with the MSVC target and does not need a web runtime. Evaluate `egui`/`eframe` first. Evaluate native Win32 controls second.
 
 Known limits:
 

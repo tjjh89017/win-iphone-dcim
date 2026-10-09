@@ -14,6 +14,10 @@ categories = ["command-line-utilities"]
 name = "win-iphone-dcim"
 path = "src/main.rs"
 
+[[bin]]
+name = "win-iphone-dcim-gui"
+path = "src/bin/gui.rs"
+
 [[test]]
 name = "e2e"
 required-features = ["fake-device"]
@@ -34,6 +38,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 [target.'cfg(windows)'.dependencies]
+# GUI toolkit. The glow (OpenGL) renderer keeps the ARM64 build simple.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.17.2"
 windows = { version = "0.62.2", features = [
     "Win32_Devices_PortableDevices",
     "Win32_Foundation",
@@ -42,7 +49,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Time",
     "Win32_System_Variant",
+    "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

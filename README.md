@@ -1,13 +1,14 @@
 # win-iphone-dcim
 
-`win-iphone-dcim` is a read-only Windows CLI. It copies photos and videos from
+`win-iphone-dcim` is a read-only Windows CLI with an optional GUI. It copies photos and videos from
 an iPhone over Windows Portable Devices (WPD). It keeps the folder structure
 that File Explorer shows under `Internal Storage/DCIM`. It does not convert
 images, videos or metadata. It never writes to or deletes from the iPhone.
 
 ## Status
 
-Phase 1 and 2 complete, GUI not started. See [SPEC.md](SPEC.md) for the
+Phase 1, 2 and 3 complete. Phase 4 (GUI) in progress: browsing, double-click
+open and in-app copy work; the Explorer paste is not done yet. See [SPEC.md](SPEC.md) for the
 full plan.
 
 Works now:
@@ -27,9 +28,13 @@ Works now:
 - Worker process isolation with a watchdog (`--timeout`), so a blocked WPD
   call cannot hang the tool. See [Worker process](#worker-process).
 
+- `win-iphone-dcim-gui.exe`: a window to browse the device, open a file with
+  its default application, and copy the checked folders and files. See
+  [GUI](#gui).
+
 Planned:
 
-- A GUI (Phase 4, optional).
+- Copy and paste or drag and drop from the GUI into File Explorer (Phase 4).
 
 ### Verification scope
 
@@ -45,6 +50,9 @@ and select a green run. Every run on `main` uploads two artifacts:
 - `win-iphone-dcim-windows-x64`
 - `win-iphone-dcim-windows-arm64`
 
+Each artifact holds `win-iphone-dcim.exe` (CLI) and `win-iphone-dcim-gui.exe`
+(GUI). Keep both files in the same folder.
+
 You must log in to GitHub to download artifacts. Artifacts expire after 7
 days. The ARM64 binary is built but not tested on hardware.
 
@@ -55,8 +63,12 @@ gh run download <run-id> -n win-iphone-dcim-windows-x64
 ```
 
 A pushed `v*` tag builds a draft GitHub release with
-`win-iphone-dcim-windows-x64.exe`, `win-iphone-dcim-windows-arm64.exe`, a
-`SHA256SUMS-<name>.txt` file per binary, and one `SHA256SUMS.txt` for both.
+`win-iphone-dcim-windows-x64.exe`, `win-iphone-dcim-gui-windows-x64.exe`,
+`win-iphone-dcim-windows-arm64.exe`, `win-iphone-dcim-gui-windows-arm64.exe`,
+a `SHA256SUMS-<name>.txt` file per target, and one `SHA256SUMS.txt` for all
+binaries. To use the GUI from a release, rename the CLI file to
+`win-iphone-dcim.exe` and keep it in the same folder as the GUI file (see
+[GUI](#gui)).
 No release is published yet.
 
 ## Requirements
@@ -188,6 +200,75 @@ Example `tree` output:
         └── 202601_b
             └── IMG_0003.DNG   21.0 MiB
 ```
+
+## GUI
+
+Start `win-iphone-dcim-gui.exe`. No console window opens.
+
+The GUI needs `win-iphone-dcim.exe` in the same folder: it starts that file
+as its device worker, as the CLI does. If the file is missing, the GUI shows
+an error and cannot open a device.
+
+The window:
+
+- Top bar: the device list, Refresh, the destination folder (Destination...),
+  "Overwrite existing (--force)", Copy (Cancel while a copy runs), Clear
+  cache, and a status text. Refresh lists the devices again and reloads the
+  tree. With one device, the GUI opens it at start.
+- Left: the device tree from `/`. A folder is listed when you open it. Each
+  folder and file has a checkbox. Checking a folder checks everything below
+  it, also the parts that are not listed yet. A folder with only some checked
+  items shows a partial mark.
+- Right: the files of the selected folder with name, size and modified date.
+  Click selects a row. Ctrl-click adds or removes a row. Shift-click selects a
+  range. Double-click opens a file, or opens a folder. Press the left button
+  on empty space or on a row that is not selected, then drag: a selection
+  rectangle selects every row it touches (rubber band). With Ctrl held when
+  the drag starts, the rows add to the selection. The list scrolls when you
+  drag past its top or bottom edge. A drag that starts on a selected row does
+  nothing yet; it is kept for the drag and drop to File Explorer.
+- Bottom: the progress of the current file (speed and ETA), the overall
+  progress, and a log of skip, retry and error lines.
+
+Right-click menus:
+
+| Where | Items |
+| --- | --- |
+| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (for Explorer paste) (disabled, next step), Check, Uncheck, Properties |
+| A folder (list or tree) | Open, Copy to..., Copy (for Explorer paste) (disabled), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
+| Empty space in the list | Refresh, Select all, Deselect all |
+
+In the list, a menu on a selected row acts on all selected rows. Open is
+enabled only for one item. Properties shows the name, the device path, and
+for a file the size, dates, WPD content type and whether it is cached; for a
+folder the number of direct subfolders and files.
+
+Copy (top bar) copies the checked items into the destination folder, like
+`cp -r -p` with the default warn-and-skip rule (or `--force` with the
+checkbox). The copy starts at the deepest folder that holds all checked
+items and copies only the checked items below it. For example, checked
+items in `202601_a` and `202601_b` go to `DEST\DCIM\202601_a` and
+`DEST\DCIM\202601_b`. "Copy to..." asks for a folder and copies the
+selected items, like `cp -r -p <items> DEST`. Both use the manifest and the
+incremental rules of `cp`, so a second copy skips verified files. Cancel
+stops after the current file.
+
+Double-click on a file downloads it to the cache, then opens it with the
+default Windows application. The file never opens before the download is
+complete. The cache is
+`%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<device path>`, with
+the original folder and file names. A cached file is reused while its size
+matches the device size. Clear cache deletes the cache folder of the open
+device. Changes in the viewer do not go back to the iPhone. HEIC photos and
+HEVC videos need the "HEIF Image Extensions" and "HEVC Video Extensions" from
+the Microsoft Store; the GUI shows this hint when Windows has no application
+for the file type.
+
+Limits:
+
+- No copy and paste or drag and drop into File Explorer yet.
+- Device requests run one at a time: while a copy runs, folder listings wait.
+- The GUI is not tested on a real device yet.
 
 ## Manifest and incremental copy
 
@@ -326,7 +407,8 @@ scripts/dev.sh xwin check --target x86_64-pc-windows-msvc
 scripts/dev.sh xwin clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
 
-The binaries go to `target/<target>/release/win-iphone-dcim.exe`. The `target`
+The binaries go to `target/<target>/release/win-iphone-dcim.exe` and
+`target/<target>/release/win-iphone-dcim-gui.exe`. The `target`
 directory is a Docker volume. GitHub Actions on `windows-latest` is the
 authoritative build. Tests that need WPD or a real iPhone are manual. Run them
 on Windows with an iPhone attached.
@@ -336,6 +418,12 @@ on Windows with an iPhone attached.
 - The tool calls the WPD COM API directly. It does not use the Windows Shell
   namespace or the Explorer copy APIs.
 - COM objects never cross threads. Each COM apartment owns its own handles.
+- The crate is a library (`src/lib.rs`) with two binaries: the CLI
+  (`src/main.rs`) and the GUI (`src/bin/gui.rs`). The GUI uses eframe/egui
+  with the glow renderer. Its UI thread never touches the device; a device
+  thread owns the `DeviceFs` and answers requests over channels. The copy
+  engine (`backup::engine`) reports progress through a `ProgressSink`: the CLI
+  draws terminal bars, the GUI gets events.
 - All WPD code is in `src/wpd/` under `#[cfg(windows)]`. On other platforms,
   WPD calls return an "unsupported platform" error.
 - The commands use the `DeviceFs` trait. Unit tests use the in-memory fake in

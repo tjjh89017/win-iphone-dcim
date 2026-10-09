@@ -2,7 +2,9 @@
 
 ## Project
 
-A Rust CLI for Windows 10/11 x64 that copies photos and videos from an iPhone over WPD. See SPEC.md.
+A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an iPhone over WPD. See SPEC.md.
+
+- `src/lib.rs` holds the modules. `src/main.rs` is the CLI. `src/bin/gui.rs` is the GUI (`win-iphone-dcim-gui`).
 
 ## Build rules
 
@@ -15,7 +17,7 @@ A Rust CLI for Windows 10/11 x64 that copies photos and videos from an iPhone ov
 
 ## Test strategy
 
-- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
+- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `ipc`, `supervisor`, `cmd/*`, `backup/*`, `gui/selection`, `gui/device`, `gui/cache`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs` and the `cfg(windows)` `SetHandleInformation` call in `supervisor`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
 - Command logic runs against the `DeviceFs` trait. Tests use the in-memory fake in `device_fs::fake`.
 - The fake is compiled only in unit tests and with the `fake-device` cargo feature. Release builds do not enable the feature. Gate fake-only code with `#[cfg(any(test, feature = "fake-device"))]`.
 - Run all tests, end-to-end included, with `scripts/dev.sh test --features fake-device`. Without the feature, cargo skips `tests/e2e.rs`.
@@ -31,6 +33,14 @@ A Rust CLI for Windows 10/11 x64 that copies photos and videos from an iPhone ov
 - Logs go to stderr, in the parent and in the worker.
 - Never pass COM pointers between processes. Send device paths and object ids instead.
 - End-to-end tests in `tests/e2e.rs` run the built program with `WIN_IPHONE_DCIM_FAKE_FS=1`. The worker then serves the in-memory fake device. The program must be built with the `fake-device` feature. Without it, the variable has no effect.
+
+## GUI
+
+- The UI thread never touches a `DeviceFs`. The device thread in `gui/device.rs` owns it and answers requests over channels.
+- The UI thread never waits for the device thread. It reads replies with `try_recv`.
+- `gui/app.rs` and `gui/shell.rs` are Windows only (`#[cfg(windows)]`). eframe and rfd are Windows-only dependencies.
+- Test the GUI logic (selection, cache paths, device thread) on Linux with the fake device. egui drawing has no unit tests.
+- The GUI starts `win-iphone-dcim.exe` from its own folder as the worker.
 
 ## Code
 
