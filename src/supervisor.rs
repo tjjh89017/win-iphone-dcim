@@ -194,6 +194,37 @@ fn spawn_with_pipe(cmd: &mut Command, pipe: &PipeWriter) -> io::Result<Child> {
     child
 }
 
+/// The worker process command. `raw` is the data pipe handle.
+///
+/// On Windows the worker gets no console window: it is a console program,
+/// and a parent without a console (the GUI) would make Windows open one.
+/// Its stdin and stdout are pipes; stderr still reaches the parent's
+/// console if the parent has one.
+fn worker_process(cmd: &WorkerCommand, raw: &str) -> Command {
+    let mut command = Command::new(&cmd.program);
+    command.args(&cmd.args);
+    if cmd.pipe_in_env {
+        command.env(ipc::DATA_PIPE_ENV, raw);
+    } else {
+        command.arg("--data-pipe").arg(raw);
+    }
+    command
+        .envs(cmd.envs.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(NO_WINDOW);
+    }
+    command
+}
+
+/// `CREATE_NO_WINDOW`.
+#[cfg(windows)]
+const NO_WINDOW: u32 = windows::Win32::System::Threading::CREATE_NO_WINDOW.0;
+
 impl Worker {
     /// Start a worker and check the protocol version.
     fn spawn(cmd: &WorkerCommand, timeout: Duration) -> Result<Self> {
@@ -203,18 +234,7 @@ impl Worker {
         };
         let (data, data_writer) = io::pipe().map_err(spawn_err)?;
         let raw = ipc::raw_pipe(&data_writer).to_string();
-        let mut command = Command::new(&cmd.program);
-        command.args(&cmd.args);
-        if cmd.pipe_in_env {
-            command.env(ipc::DATA_PIPE_ENV, &raw);
-        } else {
-            command.arg("--data-pipe").arg(&raw);
-        }
-        command
-            .envs(cmd.envs.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+        let mut command = worker_process(cmd, &raw);
         let mut child = spawn_with_pipe(&mut command, &data_writer).map_err(spawn_err)?;
         // Only the worker may hold the write end, so its exit ends the stream.
         drop(data_writer);
@@ -660,6 +680,7 @@ mod tests {
     use crate::devpath::DevicePath;
     use crate::ipc::Backend;
     use crate::model::Node;
+    use std::ffi::OsStr;
 
     const WORKER_MODE_ENV: &str = "WIN_IPHONE_DCIM_TEST_WORKER";
     const MOV: &str = "/Internal Storage/DCIM/202601_a/IMG_0002.MOV";
@@ -782,6 +803,26 @@ mod tests {
             Err(_) => 1,
         };
         std::process::exit(code);
+    }
+
+    #[test]
+    fn worker_process_passes_the_data_pipe() {
+        let mut cmd = command("normal");
+        let c = worker_process(&cmd, "42");
+        assert!(
+            c.get_envs()
+                .any(|(k, v)| k == ipc::DATA_PIPE_ENV && v == Some(OsStr::new("42")))
+        );
+        cmd.pipe_in_env = false;
+        let c = worker_process(&cmd, "42");
+        let args: Vec<&OsStr> = c.get_args().collect();
+        assert_eq!(
+            args[args.len() - 2..],
+            [OsStr::new("--data-pipe"), OsStr::new("42")]
+        );
+        // std cannot read creation flags back; check the flag value instead.
+        #[cfg(windows)]
+        assert_eq!(NO_WINDOW, 0x0800_0000);
     }
 
     fn command(mode: &str) -> WorkerCommand {

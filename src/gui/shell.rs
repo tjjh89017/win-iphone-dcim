@@ -53,6 +53,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     std::process::Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{}\"", path.display()))
+        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
         .spawn()
         .map(drop)
         .map_err(|e| format!("cannot start explorer.exe: {e}"))
