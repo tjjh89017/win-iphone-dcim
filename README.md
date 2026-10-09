@@ -7,7 +7,7 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 
 ## Status
 
-The project is in Phase 0 (proof of concept). See [SPEC.md](SPEC.md) for the
+The project is in Phase 1 (full backup MVP). See [SPEC.md](SPEC.md) for the
 full plan.
 
 Works now:
@@ -15,12 +15,15 @@ Works now:
 - `devices`: list the WPD devices.
 - `ls`: list folder contents.
 - `tree`: show folders and files as a tree.
-- `cp`: copy single device files.
+- `cp`: copy files, and folders with `-r`, with the `cp`/`rsync` trailing
+  slash rules. Each file goes to a `.part` file first and gets its final name
+  only after a size check. Progress bar, `-p`/`-a` timestamps, `-f`
+  overwrite, `--dry-run`, and an error summary.
 
-Planned:
+Planned (Phase 2):
 
-- `cp -r`: copy folders recursively.
 - Incremental copy with a JSONL manifest in `DEST/.win-iphone-dcim/`.
+- Retries, `--verify local-hash`.
 - Worker process isolation, so a blocked WPD call cannot hang the tool.
 - A GUI (Phase 4, optional).
 
@@ -57,7 +60,7 @@ originals are not on the device. The tool cannot copy those files.
 win-iphone-dcim.exe devices
 win-iphone-dcim.exe ls   [-d <INDEX>] [-l] [-R] [--json] [PATH...]
 win-iphone-dcim.exe tree [-d <INDEX>] [-L <DEPTH>] [--json] [PATH]
-win-iphone-dcim.exe cp   [-d <INDEX>] [--dry-run] SRC... DEST
+win-iphone-dcim.exe cp   [-d <INDEX>] [-r] [-n | -f] [-p] [-a] [--dry-run] [--verify size] SRC... DEST
 ```
 
 Global flags:
@@ -75,12 +78,48 @@ Commands:
   object per line (JSONL).
 - `tree` prints a branch view. The default path is `/`. `-L <DEPTH>` limits
   the depth. `--json` prints JSONL.
-- `cp` copies device files to a local path. If DEST is an existing folder,
-  each file goes into it with its original name. With one SRC, a DEST that
-  does not exist is the new file name. With two or more SRC, DEST must be an
-  existing folder. `cp` never overwrites a local file. It compares the byte
-  count with the size that the device reports. `--dry-run` prints the copy
-  plan only.
+- `cp` copies device files and folders to a local path. It never writes to
+  the device.
+  - If DEST is an existing folder, each SRC goes into it with its original
+    name. With one SRC, a DEST that does not exist is the new file name, or
+    for a folder SRC the new folder that gets the contents.
+  - With two or more SRC, DEST must be an existing folder.
+  - A folder SRC needs `-r`.
+  - The trailing slash rule of `rsync`:
+    `cp -r "/Internal Storage/DCIM" D:\Backup` creates `D:\Backup\DCIM\...`.
+    `cp -r "/Internal Storage/DCIM/" D:\Backup` copies the contents of `DCIM`
+    into `D:\Backup\...`.
+  - The tool lists one device folder at a time and copies one file at a time.
+  - Each file goes to `<name>.<random>.part` in the target folder. The tool
+    checks the byte count against the device size, then renames the file
+    with a no-clobber rename. If the device gives no size, the line shows
+    `size-unavailable`. On a failure the `.part` file is removed. A `.part`
+    file from an earlier run is never treated as a complete file. The tool
+    logs it and leaves it in place.
+  - An existing target file is skipped with a warning
+    (`[skip] <path>  exists (use --force to overwrite)`). A skip is not a
+    failure.
+  - `-f, --force` replaces an existing target file. The new data goes to a
+    `.part` file first. The target is replaced atomically only after the size
+    check. The tool logs `[overwrite] <path>`.
+  - `-n, --no-clobber` skips existing target files silently. It conflicts
+    with `-f`.
+  - `-p` sets the local modified time (and the created time on Windows)
+    from the device dates after the copy. `-a` is `-r -p`. Timestamps never
+    change a skip or copy decision.
+  - Device names that Windows cannot hold (reserved names such as `CON`,
+    `<>:"/\|?*`, control characters, a trailing dot or space) and names in
+    one folder that differ only by case are errors. The tool never renames a
+    file.
+  - `--dry-run` prints `[plan]` and `[error]` lines and writes nothing.
+  - `--verify size` is the default. `--verify local-hash` comes in Phase 2.
+  - On a terminal, stderr shows an overall line (files, bytes, elapsed,
+    average speed) and a bar for the current file (bytes, percent, MiB/s,
+    ETA). The totals grow while folders are listed. Without a terminal, or
+    with `--log-format json`, progress goes to the log as events.
+  - At the end, `cp` prints
+    `[done] copied=N skipped=N exists=N failed=N` with the total bytes and
+    the average speed, then the failures grouped by category.
 
 Device paths:
 
@@ -89,10 +128,6 @@ Device paths:
 - Each component matches the original file name first, then the object name.
 - Quote a path that contains spaces.
 - Use PowerShell or cmd. Git Bash (MSYS) rewrites arguments that start with `/`.
-- Planned for `cp -r`: the trailing slash rule of `rsync`.
-  `cp -r "/Internal Storage/DCIM" D:\Backup` will create `D:\Backup\DCIM\...`.
-  `cp -r "/Internal Storage/DCIM/" D:\Backup` will copy the contents of `DCIM`
-  into `D:\Backup\...`. The parser already keeps the trailing slash.
 
 Examples:
 
@@ -103,6 +138,8 @@ win-iphone-dcim.exe ls -l "/Internal Storage/DCIM/202601_a"
 win-iphone-dcim.exe ls -R --json "/Internal Storage/DCIM"
 win-iphone-dcim.exe cp --dry-run "/Internal Storage/DCIM/202601_a/IMG_0001.HEIC" D:\Test\
 win-iphone-dcim.exe cp "/Internal Storage/DCIM/202601_a/IMG_0001.HEIC" D:\Test\
+win-iphone-dcim.exe cp -a "/Internal Storage/DCIM" D:\iPhoneBackup
+win-iphone-dcim.exe cp -r --dry-run "/Internal Storage/DCIM/" D:\iPhoneBackup\DCIM
 ```
 
 Example `tree` output:
@@ -123,8 +160,8 @@ Example `tree` output:
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Some files or paths failed (not found, size mismatch, local file exists, I/O error) |
-| 2 | Command-line error (bad arguments, more than one device and no `-d`, DEST is not a folder) |
+| 1 | Some files or paths failed (not found, unsafe name, case collision, size mismatch, I/O error). A skipped existing file is not a failure |
+| 2 | Command-line error (bad arguments, more than one device and no `-d`, DEST is not a folder, a Phase 2 option such as `--verify local-hash`) |
 | 3 | Device not found, access denied, or the device cannot be opened |
 | 4 | Internal error (unexpected WPD error, unsupported platform) |
 

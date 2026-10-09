@@ -129,6 +129,7 @@ win-iphone-dcim/
 │   ├── device_fs.rs           # device file system access for the commands
 │   ├── devpath.rs             # device path parsing
 │   ├── paths.rs               # local path handling
+│   ├── progress.rs            # cp progress bars and progress events
 │   ├── cmd/
 │   │   ├── mod.rs
 │   │   ├── ls.rs              # ls command
@@ -141,12 +142,12 @@ win-iphone-dcim/
 │   │   ├── enumerate.rs       # traverse object tree
 │   │   ├── properties.rs      # object name, content type, size
 │   │   └── stream.rs          # IPortableDeviceResources::GetStream
-│   ├── backup/                # planned
+│   ├── backup/
 │   │   ├── mod.rs
-│   │   ├── planner.rs         # path mapping, conflict checks, skip rules
+│   │   ├── planner.rs         # path mapping, cp/rsync DEST rules, lazy folder walk
 │   │   ├── transfer.rs        # .part copy + validation + atomic rename
-│   │   ├── manifest.rs        # JSONL load/append/reconcile
-│   │   └── paths.rs           # Windows filename validation
+│   │   ├── manifest.rs        # planned; JSONL load/append/reconcile
+│   │   └── paths.rs           # Windows filename validation, case collisions
 │   ├── supervisor.rs          # planned; parent process and worker lifecycle
 │   ├── ipc.rs                 # planned; JSONL process messages
 │   └── gui/                   # planned; Phase 4 only; see section 10
@@ -165,7 +166,7 @@ You can start with a single binary. Start the worker with the hidden `worker` su
 win-iphone-dcim.exe devices
 win-iphone-dcim.exe ls   [-d <device>] [-l] [-R] [--json] [PATH...]
 win-iphone-dcim.exe tree [-d <device>] [-L <depth>] [--json] [PATH]
-win-iphone-dcim.exe cp   [-d <device>] [-r] [-n] [-p] [-a] [--dry-run] [--verify size|local-hash] SRC... DEST
+win-iphone-dcim.exe cp   [-d <device>] [-r] [-n | -f] [-p] [-a] [--dry-run] [--verify size|local-hash] SRC... DEST
 win-iphone-dcim.exe verify DEST
 ```
 
@@ -202,9 +203,10 @@ win-iphone-dcim.exe verify DEST
 
 ### Conflicts and manifest
 
-- By default, fail when a target file exists and has a different size or has no manifest record.
-- `-n` (no-clobber) skips every existing target file and reports it.
-- The first version never overwrites a file.
+- By default, when a target file exists, warn and skip the file. Keep the existing file. Count the file as skipped. The summary shows these files in the `exists` field. Such a skip is not a failure.
+- `-f` (force) overwrites an existing target file. Copy to a `.part` file first. Verify the size. Then replace the target with an atomic rename. Never truncate the existing file before the new data is complete.
+- `-n` (no-clobber) skips every existing target file silently. `-n` and `-f` cannot be used together.
+- The tool never overwrites a file in place.
 - Add `-i` (interactive replace or skip prompt) only in a later version.
 - Every `cp` writes the JSONL manifest to `DEST/.win-iphone-dcim/manifest.jsonl`. Every `cp` applies the incremental rules in section 7.
 - A second `cp` of the same tree skips the verified files.
@@ -215,7 +217,8 @@ win-iphone-dcim.exe verify DEST
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-r` | false | Copy folders recursively. A folder `SRC` needs this flag |
-| `-n` | false | Do not overwrite. Skip every existing target file and report it |
+| `-n` | false | Do not overwrite. Skip every existing target file silently. Conflicts with `-f` |
+| `-f` | false | Overwrite an existing target file. Copy to a `.part` file, verify the size, then replace the target atomically. Without `-f` and `-n`, the tool warns and skips an existing target file |
 | `-p` | false | Preserve timestamps. After the commit, set the local modified time, and the created time where Windows allows it, from `WPD_OBJECT_DATE_MODIFIED` and `WPD_OBJECT_DATE_CREATED`. If the device gives no date, keep the copy time and log it |
 | `-a` | false | Archive mode. Equal to `-r -p`. Permissions, ownership and links do not exist on the device, so `-a` preserves only timestamps |
 | `--dry-run` | false | Enumerate and print the copy plan only. Do not write files |
@@ -251,7 +254,7 @@ win-iphone-dcim.exe verify DEST
 [copy] DCIM/202601_a/IMG_0001.HEIC  3.7 MiB / 3.7 MiB
 [skip] DCIM/202601_a/IMG_0002.MOV  verified
 [retry 1/3] DCIM/202601_b/IMG_0021.MOV  device temporarily unavailable
-[done] copied=142 skipped=65 failed=0
+[done] copied=142 skipped=65 exists=3 failed=0
 ```
 
 Recommended exit codes: `0` all files completed; `1` some files failed; `2` CLI/configuration error; `3` the tool cannot find or open the device; `4` worker/IPC failure.
@@ -283,6 +286,7 @@ enumerated file entry
   -> flush / sync_data as policy requires
   -> ensure bytes copied match expected WPD size (if provided)
   -> rename .part to final path ONLY when target does not already exist
+     (with -f: replace the target atomically)
   -> append committed manifest record
 ```
 
@@ -290,7 +294,7 @@ enumerated file entry
 - Treat only a `Read()` that returns 0 as EOF. If the expected size is known and the stream has fewer bytes, fail. If the stream has more bytes than expected, report a metadata mismatch. Keep the error information.
 - Mark the verification status as `size-unavailable` if the tool cannot get the source size. Do not claim that the file is verified.
 - Give each `.part` file a unique name. Never treat a remaining partial file as a complete file. Before a retry, remove or quarantine the partial file from the failed attempt.
-- Use a safe no-clobber strategy for the final rename. On Windows, `rename` can affect an existing file. Guarantee that no overwrite occurs, for example with explicit Windows create/move flags.
+- Use a safe no-clobber strategy for the final rename. On Windows, `rename` can affect an existing file. Guarantee that no overwrite occurs, for example with explicit Windows create/move flags. With `-f`, replace the target atomically: on Windows, call `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`.
 - Use a hash only as proof of local integrity. A hash proves that the local file did not change before and after a copy, or that two reads match. A hash does not prove that the iPhone original and the local file are identical. Only a verifiable source checksum from the device can prove that.
 - Do not skip a file on its file name alone. The content or metadata of a file on the iPhone can change.
 
@@ -298,7 +302,7 @@ enumerated file entry
 
 - A **completed manifest record**, an existing target file, and a matching size → Skip the file.
 - An enabled `local-hash` mode and a stored hash in the manifest → Recompute the hash. Skip the file only if the hash matches.
-- An existing target file with a different size, or an inconsistent manifest → Report a conflict. By default, fail and keep the existing file.
+- An existing target file with a different size, or an inconsistent manifest → Report a conflict. By default, warn, skip, and keep the existing file. With `-f`, replace it.
 - No manifest record, but an existing target file with the same size → Mark the file as `unverified-existing` in the first version. By default, do not overwrite the file. Do not claim a successful backup automatically. Add an explicit adopt feature later (not in v1).
 - Manifest writes → Make the writes tolerate an unexpected shutdown. Append and flush each record. When you read the manifest, skip an incomplete last JSONL line. Before a run, rebuild the state and compare it with the local files.
 
@@ -328,7 +332,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 ## 9. Security, paths, and data integrity
 
 - For names that come from the device: sanitize or reject absolute paths, `..`, drive prefixes, UNC paths, invalid Windows file names, reserved names (such as CON, NUL), and path traversal.
-- Treat case-insensitive collisions on Windows, duplicate file names, and illegal characters as errors. **By default, report an error and stop the transfer of that file**. Never overwrite silently. Never rename silently and then call the result "structure fully preserved".
+- Treat case-insensitive collisions on Windows, duplicate file names, and illegal characters as errors. **For an unsafe name or a collision, report an error and stop the transfer of that file**. An existing target file is not such an error: the tool warns and skips it, or replaces it with `-f` (section 5). Never overwrite silently. Never rename silently and then call the result "structure fully preserved".
 - Do not use EXIF dates to make folders or to rename files.
 - Do not use the modification time as the only criterion. The file size and time from the device can be missing or incorrect. Timestamps that `-p` preserves are metadata only. Do not use them in skip or verify decisions.
 - Do not delete extra files at the destination by default. This prevents accidental loss of past backups.
@@ -342,7 +346,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 - Handle Unicode in all paths. Keep local paths as `OsString` or `PathBuf`. Never keep them as `String`. Convert to UTF-16 only at the Windows API boundary.
 - Device names arrive as UTF-16 from WPD. Convert them with the lossless Windows path functions. Reject a name that is not valid Unicode. Do not replace characters silently.
 - Support paths longer than 260 characters. Make `DEST` absolute with `std::path::absolute`. Before every file operation, add the verbatim prefix `\\?\` for drive paths. Use `\\?\UNC\server\share` for UNC paths. Do not depend on the `LongPathsEnabled` registry setting.
-- Use Windows API calls that guarantee no overwrite. `std::fs::rename` on Windows uses `MOVEFILE_REPLACE_EXISTING`. Do not use it for the final commit. Call `MoveFileExW` without that flag, or use `create_new` plus a copy. The commit must fail if the target exists.
+- Use Windows API calls that guarantee no overwrite. `std::fs::rename` on Windows uses `MOVEFILE_REPLACE_EXISTING`. Do not use it for the final commit. Call `MoveFileExW` without that flag, or use `create_new` plus a copy. The commit must fail if the target exists. Only `-f` replaces a target, with `MoveFileExW` and `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` through the `\\?\` path.
 - Expect SMB differences. A share can be case-sensitive or case-insensitive. Check for a case-insensitive collision with the actual listing of the target folder. Do not assume the case behavior.
 - `fsync` on SMB can be slow or a no-op. Report this as a limit. Do not fail.
 - Treat a network error during a write as a transient error. Keep the `.part` file rule. Never leave a partial file under the final name.
@@ -362,12 +366,12 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 
 ### Phase 1 — Full backup MVP
 
-- [ ] Implement `cp -r` with recursive enumeration and streamed copy.
-- [ ] Implement the trailing slash rules and the multiple SRC rule exactly as section 5 states.
-- [ ] Write to a safe `.part` file. Commit with no-clobber after completion.
-- [ ] Verify the copy size. Show an error summary. Return a non-zero exit code for failures.
-- [ ] Implement dry-run and logging. Add path safety tests.
-- [ ] Implement `-p` and `-a`. Set file times with `SetFileTime` through the `\\?\` path.
+- [x] Implement `cp -r` with recursive enumeration and streamed copy.
+- [x] Implement the trailing slash rules and the multiple SRC rule exactly as section 5 states.
+- [x] Write to a safe `.part` file. Commit with no-clobber after completion.
+- [x] Verify the copy size. Show an error summary. Return a non-zero exit code for failures.
+- [x] Implement dry-run and logging. Add path safety tests.
+- [x] Implement `-p` and `-a`. Set file times with `SetFileTime` through the `\\?\` path.
 
 ### Phase 2 — Incremental and reliability
 
@@ -420,7 +424,7 @@ Known limits:
 | Not sufficient local disk space | The tool shows a clear error and keeps existing files |
 | iPhone locked / not trusted | The tool shows a clear error. The tool does not retry without limit |
 | WPD `Read()` hangs | The parent detects the hang and cleans up the worker |
-| A file of a different size is at the target path | The tool marks a conflict. The tool never overwrites the file |
+| A file of a different size is at the target path | The tool warns and skips. With `-f` it replaces the file through a `.part` file. It never overwrites in place |
 | Case collision or illegal file name | The tool shows a clear error. The tool does not rename the file silently |
 | No file size metadata | The tool correctly marks the status as unverified |
 | An old object ID becomes invalid after a reconnection | The tool enumerates again and gets the new object ID |

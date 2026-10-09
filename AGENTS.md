@@ -15,7 +15,7 @@ A Rust CLI for Windows 10/11 x64 that copies photos and videos from an iPhone ov
 
 ## Test strategy
 
-- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `cmd/*`) do not import `windows`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
+- Portable modules (`cli`, `model`, `devpath`, `device_fs`, `paths`, `error`, `progress`, `cmd/*`, `backup/*`) do not import `windows`, except the `cfg(windows)` file API calls in `backup/transfer.rs`. Their unit tests run on Linux in Docker with `scripts/dev.sh test`.
 - Command logic runs against the `DeviceFs` trait. Tests use the in-memory fake in `device_fs::fake`.
 - All WPD code is under `#[cfg(windows)]` in `src/wpd/`. On other platforms `wpd` returns an "unsupported platform" error.
 - Check the Windows code with `scripts/dev.sh xwin check --target x86_64-pc-windows-msvc` and `scripts/dev.sh xwin clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings`.
