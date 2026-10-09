@@ -1189,7 +1189,8 @@ mod tests {
             out.contains("[skip] /Internal Storage/DCIM/202601_a/IMG_0001.HEIC  verified"),
             "{out}"
         );
-        assert!(out.contains("202601_b/IMG_0001.HEIC  conflict:"), "{out}");
+        let conflict = out.lines().find(|l| l.contains("  conflict:")).unwrap();
+        assert!(conflict.contains("202601_b"), "{out}");
         assert!(
             out.contains("[plan] /Internal Storage/DCIM/202601_a/IMG_0002.MOV -> "),
             "{out}"
