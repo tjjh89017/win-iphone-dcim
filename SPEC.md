@@ -134,7 +134,8 @@ win-iphone-dcim/
 │   │   ├── mod.rs
 │   │   ├── ls.rs              # ls command
 │   │   ├── tree.rs            # tree command
-│   │   └── cp.rs              # cp command
+│   │   ├── cp.rs              # cp command, incremental rules, retries
+│   │   └── verify.rs          # verify command
 │   ├── wpd/
 │   │   ├── mod.rs
 │   │   ├── com.rs             # COM apartment lifecycle; no cross-thread COM handles
@@ -146,7 +147,7 @@ win-iphone-dcim/
 │   │   ├── mod.rs
 │   │   ├── planner.rs         # path mapping, cp/rsync DEST rules, lazy folder walk
 │   │   ├── transfer.rs        # .part copy + validation + atomic rename
-│   │   ├── manifest.rs        # planned; JSONL load/append/reconcile
+│   │   ├── manifest.rs        # JSONL load/append/reconcile
 │   │   └── paths.rs           # Windows filename validation, case collisions
 │   ├── supervisor.rs          # planned; parent process and worker lifecycle
 │   ├── ipc.rs                 # planned; JSONL process messages
@@ -167,7 +168,7 @@ win-iphone-dcim.exe devices
 win-iphone-dcim.exe ls   [-d <device>] [-l] [-R] [--json] [PATH...]
 win-iphone-dcim.exe tree [-d <device>] [-L <depth>] [--json] [PATH]
 win-iphone-dcim.exe cp   [-d <device>] [-r] [-n | -f] [-p] [-a] [--dry-run] [--verify size|local-hash] SRC... DEST
-win-iphone-dcim.exe verify DEST
+win-iphone-dcim.exe verify [--hash] DEST
 ```
 
 ### Path model
@@ -187,6 +188,9 @@ win-iphone-dcim.exe verify DEST
   - `--json` prints one JSON object per line. Each object has `depth`, `path`, `name`, `is_folder`, `size`, and `object_id`.
 - `cp` copies from the device to a local path. Each `SRC` is a device path. `DEST` is a local path. `cp` never writes to the device.
 - `verify` checks the files in `DEST` against the manifest in `DEST/.win-iphone-dcim/manifest.jsonl`.
+  - Each record needs a file with the recorded size. `--hash` also recomputes the stored BLAKE3 hash.
+  - A file under `DEST` without a record is `unrecorded`. `verify` ignores `.win-iphone-dcim/` and `*.part` files.
+  - `verify` prints one line per file and `[verify] ok=N missing=N size-mismatch=N hash-mismatch=N unrecorded=N`. The exit code is `0` if all files are ok, otherwise `1`.
 
 ### Copy rules
 
@@ -232,6 +236,7 @@ win-iphone-dcim.exe verify DEST
 | `--retries <n>` | 3 | Maximum number of retries for each file. This number counts the additional attempts after a failure |
 | `--timeout <duration>` | 120s | Watchdog for a worker that does not respond. The tool cannot cancel all COM calls |
 | `--log-format` | text | `text` / `json` |
+| `--diagnostic` | false | Also log the raw device ID. Without it, logs show the first 8 hex characters of its BLAKE3 hash |
 
 ### Example output
 
@@ -375,7 +380,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 
 ### Phase 2 — Incremental and reliability
 
-- [ ] Implement the JSONL manifest, skip, conflict, and retry.
+- [x] Implement the JSONL manifest, skip, conflict, and retry.
 - [ ] Implement child process isolation, the watchdog, and worker crash recovery.
 - [ ] Rebuild the enumeration after a USB unplug/replug. Do not overwrite existing data.
 - [ ] Run long tests on a real device with 10,000+ files and many large MOV files.

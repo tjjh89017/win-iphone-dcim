@@ -7,8 +7,8 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 
 ## Status
 
-The project is in Phase 1 (full backup MVP). See [SPEC.md](SPEC.md) for the
-full plan.
+Phase 1 (full backup MVP) is complete. Phase 2 (incremental copy and
+reliability) is in progress. See [SPEC.md](SPEC.md) for the full plan.
 
 Works now:
 
@@ -19,11 +19,14 @@ Works now:
   slash rules. Each file goes to a `.part` file first and gets its final name
   only after a size check. Progress bar, `-p`/`-a` timestamps, `-f`
   overwrite, `--dry-run`, and an error summary.
+- Incremental copy with a JSONL manifest in `DEST/.win-iphone-dcim/`. A
+  second `cp` of the same tree skips the verified files.
+- Retries with backoff for transient errors (`--retries`).
+- `--verify local-hash`: a BLAKE3 hash of each new copy.
+- `verify`: check DEST against the manifest.
 
-Planned (Phase 2):
+Planned:
 
-- Incremental copy with a JSONL manifest in `DEST/.win-iphone-dcim/`.
-- Retries, `--verify local-hash`.
 - Worker process isolation, so a blocked WPD call cannot hang the tool.
 - A GUI (Phase 4, optional).
 
@@ -60,7 +63,8 @@ originals are not on the device. The tool cannot copy those files.
 win-iphone-dcim.exe devices
 win-iphone-dcim.exe ls   [-d <INDEX>] [-l] [-R] [--json] [PATH...]
 win-iphone-dcim.exe tree [-d <INDEX>] [-L <DEPTH>] [--json] [PATH]
-win-iphone-dcim.exe cp   [-d <INDEX>] [-r] [-n | -f] [-p] [-a] [--dry-run] [--verify size] SRC... DEST
+win-iphone-dcim.exe cp   [-d <INDEX>] [-r] [-n | -f] [-p] [-a] [--dry-run] [--verify size|local-hash] SRC... DEST
+win-iphone-dcim.exe verify [--hash] DEST
 ```
 
 Global flags:
@@ -69,6 +73,10 @@ Global flags:
   omit it when exactly one device is connected.
 - `--log-format text|json` sets the log format. The default is `text`. Logs go
   to stderr. Results go to stdout. Set `RUST_LOG=debug` for more detail.
+- `--retries <N>` sets the number of additional attempts for a file after a
+  transient error. The default is 3. See [Retries](#retries).
+- `--diagnostic` also logs the raw device ID. Without it, logs show only the
+  first 8 hex characters of its BLAKE3 hash.
 
 Commands:
 
@@ -96,14 +104,17 @@ Commands:
     `size-unavailable`. On a failure the `.part` file is removed. A `.part`
     file from an earlier run is never treated as a complete file. The tool
     logs it and leaves it in place.
-  - An existing target file is skipped with a warning
-    (`[skip] <path>  exists (use --force to overwrite)`). A skip is not a
+  - Every copied file gets a record in the manifest. An existing target
+    file follows the [incremental rules](#manifest-and-incremental-copy):
+    a verified file is skipped (`[skip] <path>  verified`). Any other
+    existing file is skipped with a warning
+    (`[skip] <path>  conflict: ... (use --force to replace)`). A skip is not a
     failure.
-  - `-f, --force` replaces an existing target file. The new data goes to a
-    `.part` file first. The target is replaced atomically only after the size
-    check. The tool logs `[overwrite] <path>`.
-  - `-n, --no-clobber` skips existing target files silently. It conflicts
-    with `-f`.
+  - `-f, --force` replaces an existing target file that is not verified. The
+    new data goes to a `.part` file first. The target is replaced atomically
+    only after the size check. The tool logs `[overwrite] <path>`.
+  - `-n, --no-clobber` skips existing target files that are not verified
+    silently. It conflicts with `-f`.
   - `-p` sets the local modified time (and the created time on Windows)
     from the device dates after the copy. `-a` is `-r -p`. Timestamps never
     change a skip or copy decision.
@@ -111,8 +122,12 @@ Commands:
     `<>:"/\|?*`, control characters, a trailing dot or space) and names in
     one folder that differ only by case are errors. The tool never renames a
     file.
-  - `--dry-run` prints `[plan]` and `[error]` lines and writes nothing.
-  - `--verify size` is the default. `--verify local-hash` comes in Phase 2.
+  - `--dry-run` prints the decision for every file (`[plan]`, `[skip]`,
+    `[error]`) and writes nothing, not even the manifest.
+  - `--verify size` is the default. `--verify local-hash` hashes each new
+    copy with BLAKE3 while the bytes go to disk (no second read) and stores
+    the hash. Before a skip it hashes the local file again and skips only if
+    the hash matches.
   - On a terminal, stderr shows an overall line (files, bytes, elapsed,
     average speed) and a bar for the current file (bytes, percent, MiB/s,
     ETA). The totals grow while folders are listed. Without a terminal, or
@@ -120,6 +135,8 @@ Commands:
   - At the end, `cp` prints
     `[done] copied=N skipped=N exists=N failed=N` with the total bytes and
     the average speed, then the failures grouped by category.
+- `verify` checks the files in DEST against the manifest. See
+  [verify](#verify).
 
 Device paths:
 
@@ -155,15 +172,89 @@ Example `tree` output:
             └── IMG_0003.DNG   21.0 MiB
 ```
 
+## Manifest and incremental copy
+
+`cp` writes `DEST/.win-iphone-dcim/manifest.jsonl`. DEST is the copy root that
+you give to `cp`: the DEST folder, or the parent folder when DEST is a new
+file name. The tool creates the folder on the first write.
+
+Each committed file appends one JSON line:
+
+```json
+{"v":1,"device":"3f2a9c01d4e5b677","path":"DCIM/202601_a/IMG_0001.HEIC","source":"/Internal Storage/DCIM/202601_a/IMG_0001.HEIC","size":3879731,"modified":"2026-01-03 10:20:30","verification":"local-hash","hash_alg":"blake3","hash":"…","committed_at":"2026-10-09T08:00:00Z"}
+```
+
+- `device` is a hash of the device ID. The raw device ID is never stored.
+- `path` is the path under DEST with `/` separators.
+- `verification` is `size` (the byte count matches the device size),
+  `local-hash` (the size matches and a hash is stored), or `size-unavailable`
+  (the device gave no size, so the copy is not verified).
+- The hash proves only that the local file did not change. It does not prove
+  that the local file equals the original on the iPhone.
+- Each line is flushed and synced. If the tool stops while it writes a line,
+  the next run skips that incomplete line, logs it, and continues. A later
+  record for the same path replaces an earlier one.
+
+Before a run, the tool compares each record with the local file. A missing
+file or a different size makes the record stale. Then, for each file:
+
+| Situation | Default | With `-f` |
+| --- | --- | --- |
+| No local file | Copy, then record | Same |
+| Record, local file and device size match | Skip as `verified` | Same |
+| Same, with `--verify local-hash` and a stored hash | Skip only if the hash matches, otherwise conflict | Same |
+| Local file with a different size, or a stale record, or a record from another device or source | Conflict: warn, skip, count in `exists` | Replace, then record |
+| No record, local file with the same size | `unverified-existing`: warn, skip, count in `exists`, no record | Replace, then record |
+
+Timestamps never change a decision. The tool never adopts an existing file
+without a record. Use `-f` to copy it again.
+
+## Retries
+
+A failed file is retried on its own. Only transient errors are retried: the
+device is busy or unavailable, an I/O call timed out, a network (SMB) write
+failed, or the device worker was restarted. Not found, unsafe names, case
+collisions, a full disk and access denied fail at once.
+
+- `--retries <N>` additional attempts. The default is 3.
+- The wait before each retry is 1 s, 3 s, 10 s, then 10 s.
+- The `.part` file of the failed attempt is removed before the next attempt.
+  Each attempt starts again from the first byte.
+- Each retry prints `[retry k/N] <path>  <reason>`.
+- If the device is still unavailable after the last retry, `cp` prints the
+  summary and stops with exit code 3.
+
+## verify
+
+```powershell
+win-iphone-dcim.exe verify D:\iPhoneBackup
+win-iphone-dcim.exe verify --hash D:\iPhoneBackup
+```
+
+`verify` reads the manifest in DEST and checks that each recorded file exists
+with the recorded size. `--hash` also recomputes the BLAKE3 hash where the
+manifest has one. Files under DEST without a record are `unrecorded`. The
+`.win-iphone-dcim` folder and `*.part` files are ignored. `verify` never
+opens the device.
+
+It prints one line per file (`[ok]`, `[missing]`, `[size-mismatch]`,
+`[hash-mismatch]`, `[unrecorded]`) and a summary:
+
+```text
+[verify] ok=142 missing=0 size-mismatch=0 hash-mismatch=0 unrecorded=3
+```
+
+The exit code is 0 if all files are ok, 1 otherwise.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Some files or paths failed (not found, unsafe name, case collision, size mismatch, I/O error). A skipped existing file is not a failure |
-| 2 | Command-line error (bad arguments, more than one device and no `-d`, DEST is not a folder, a Phase 2 option such as `--verify local-hash`) |
+| 1 | Some files or paths failed (not found, unsafe name, case collision, size mismatch, I/O error), or `verify` found a problem. A skipped existing file is not a failure |
+| 2 | Command-line error (bad arguments, more than one device and no `-d`, DEST is not a folder) |
 | 3 | Device not found, access denied, or the device cannot be opened |
-| 4 | Internal error (unexpected WPD error, unsupported platform) |
+| 4 | Internal error (unexpected WPD error, device worker failure, unsupported platform) |
 
 ## Paths
 
