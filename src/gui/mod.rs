@@ -10,6 +10,7 @@ pub mod cache;
 pub mod chunks;
 pub mod device;
 pub mod filedesc;
+pub mod nav;
 pub mod selection;
 
 #[cfg(windows)]

@@ -227,6 +227,12 @@ The window:
   drag past its top or bottom edge. A drag that starts on a selected row
   drags the selected items to File Explorer (see below). Ctrl+C copies the
   selected rows for a paste in File Explorer.
+- Above the file list: Back (←), Forward (→), Up (↑) and the path bar
+  (`/ › Internal Storage › DCIM › 202601_a`). Click a path segment to go to
+  that folder. Entering a folder (double-click, a click in the tree, Open,
+  the path bar, Up) adds it to the history. Shortcuts: Alt+Left = Back,
+  Alt+Right = Forward, Alt+Up or Backspace = Up, mouse side buttons = Back
+  and Forward, Enter opens the one selected row.
 - Bottom: the progress of the current file (speed and ETA), the overall
   progress, and a log of skip, retry and error lines.
 

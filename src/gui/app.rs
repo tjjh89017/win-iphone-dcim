@@ -21,6 +21,7 @@ use super::device::{
     CopyProgress, CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector,
 };
 use super::dnd;
+use super::nav::{NavHistory, breadcrumbs};
 use super::selection::{Check, Entry, ListSelection, Tree, band_rows};
 use super::shell;
 use crate::backup::engine::Note;
@@ -133,6 +134,9 @@ enum Action {
     ExplorerCopy(Vec<String>),
     /// Drag these paths to File Explorer.
     DragOut(Vec<String>),
+    Back,
+    Forward,
+    Up,
 }
 
 /// The press point of a rubber-band drag: screen x, and y in list content
@@ -164,6 +168,8 @@ struct App {
     expanding: HashSet<String>,
     /// The folder that the file list shows.
     folder: Option<String>,
+    /// Back, Forward and Up of the file list.
+    nav: NavHistory,
     /// The highlighted rows of the file list.
     rows: ListSelection,
     /// The object in the properties window.
@@ -204,6 +210,7 @@ impl App {
             loading: HashSet::new(),
             expanding: HashSet::new(),
             folder: None,
+            nav: NavHistory::default(),
             rows: ListSelection::default(),
             properties: None,
             band: None,
@@ -304,6 +311,7 @@ impl App {
                 self.loading.clear();
                 self.expanding.clear();
                 self.folder = Some(path.clone());
+                self.nav.reset(&path);
                 self.rows.clear();
                 self.properties = None;
                 self.load(&path);
@@ -623,13 +631,21 @@ impl App {
                 }
                 Action::Load(path) => self.load(&path),
                 Action::Reload(path) => self.reload(&path),
-                Action::ShowFolder(path) => {
-                    self.load(&path);
-                    if self.folder.as_deref() != Some(path.as_str()) {
-                        self.rows.clear();
-                        self.band = None;
+                Action::ShowFolder(path) => self.enter(path),
+                Action::Back => {
+                    if let Some(p) = self.nav.back().map(str::to_owned) {
+                        self.show(p);
                     }
-                    self.folder = Some(path);
+                }
+                Action::Forward => {
+                    if let Some(p) = self.nav.forward().map(str::to_owned) {
+                        self.show(p);
+                    }
+                }
+                Action::Up => {
+                    if let Some(p) = self.nav.up().map(str::to_owned) {
+                        self.show(p);
+                    }
                 }
                 Action::Click { index, ctrl, shift } => {
                     let rows = self.list_rows();
@@ -645,7 +661,7 @@ impl App {
                 }
                 Action::DeselectAll => self.rows.clear(),
                 Action::Reveal(path) => {
-                    self.folder = Some(parent_path(&path).to_owned());
+                    self.enter(parent_path(&path).to_owned());
                     let rows = self.list_rows();
                     if let Some(i) = rows.iter().position(|r| *r == path) {
                         self.rows.click(&rows, i, false, false);
@@ -696,11 +712,25 @@ impl App {
         }
     }
 
+    /// Show `path` in the file list and add it to the history.
+    fn enter(&mut self, path: String) {
+        self.nav.go(&path);
+        self.show(path);
+    }
+
+    /// Show `path` in the file list. The history is already set.
+    fn show(&mut self, path: String) {
+        self.load(&path);
+        if self.folder.as_deref() != Some(path.as_str()) {
+            self.rows.clear();
+            self.band = None;
+        }
+        self.folder = Some(path);
+    }
+
     fn open(&mut self, path: String) {
         if !self.is_file(&path) {
-            self.load(&path);
-            self.rows.clear();
-            self.folder = Some(path);
+            self.enter(path);
             return;
         }
         if self.download.as_ref().is_some_and(|d| d.path == path) {
@@ -1015,7 +1045,7 @@ impl App {
                 ui.close();
             }
         });
-        ui.heading(folder.as_str());
+        self.nav_bar(ui, folder, actions);
         let Some(children) = tree.children(folder) else {
             ui.weak("loading...");
             return;
@@ -1041,6 +1071,12 @@ impl App {
         });
         if copy_key && !targets.is_empty() {
             actions.push(Action::ExplorerCopy(targets.clone()));
+        }
+        if let [one] = targets.as_slice()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            && !ui.ctx().egui_wants_keyboard_input()
+        {
+            actions.push(Action::Open(one.clone()));
         }
         let pointer = ui.input(|i| i.pointer.latest_pos());
         let moved = press
@@ -1148,6 +1184,61 @@ impl App {
                     actions.push(Action::BandUpdate(rows));
                 }
             });
+    }
+
+    /// Back, Forward, Up and the clickable path, with their shortcuts.
+    fn nav_bar(&self, ui: &mut egui::Ui, folder: &str, actions: &mut Vec<Action>) {
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let (back, forward, up) = ui.input(|i| {
+            let alt = i.modifiers.alt;
+            (
+                (alt && i.key_pressed(egui::Key::ArrowLeft))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra1),
+                (alt && i.key_pressed(egui::Key::ArrowRight))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra2),
+                (alt && i.key_pressed(egui::Key::ArrowUp))
+                    || (!typing && i.key_pressed(egui::Key::Backspace)),
+            )
+        });
+        ui.horizontal(|ui| {
+            let b = ui
+                .add_enabled(self.nav.can_back(), Button::new("←"))
+                .on_hover_text("Back (Alt+Left)");
+            if (b.clicked() || back) && self.nav.can_back() {
+                actions.push(Action::Back);
+            }
+            let f = ui
+                .add_enabled(self.nav.can_forward(), Button::new("→"))
+                .on_hover_text("Forward (Alt+Right)");
+            if (f.clicked() || forward) && self.nav.can_forward() {
+                actions.push(Action::Forward);
+            }
+            let u = ui
+                .add_enabled(self.nav.can_up(), Button::new("↑"))
+                .on_hover_text("Up (Alt+Up, Backspace)");
+            if (u.clicked() || up) && self.nav.can_up() {
+                actions.push(Action::Up);
+            }
+            ui.separator();
+            let crumbs = breadcrumbs(folder);
+            let last = crumbs.len() - 1;
+            for (i, (label, path)) in crumbs.into_iter().enumerate() {
+                if i > 1 {
+                    ui.label("›");
+                }
+                let text = if i == last {
+                    RichText::new(label).strong()
+                } else {
+                    RichText::new(label)
+                };
+                if ui.add(Button::new(text).frame(false)).clicked() {
+                    actions.push(Action::ShowFolder(path));
+                }
+                if i == 0 && last > 0 {
+                    ui.label("›");
+                }
+            }
+        });
     }
 
     /// Paint the rubber band and scroll when the pointer is past an edge.

@@ -161,6 +161,7 @@ win-iphone-dcim/
 │       ├── app.rs             # egui window (Windows only); UI thread
 │       ├── device.rs          # device thread; owns the DeviceFs
 │       ├── selection.rs       # tree model, check marks, list selection
+│       ├── nav.rs             # Back/Forward/Up history and path bar segments
 │       ├── cache.rs           # open-file cache paths
 │       ├── filedesc.rs        # FILEGROUPDESCRIPTORW layout and flags for the Explorer paste
 │       ├── chunks.rs          # bounded chunk channel from the device thread to a paste stream
