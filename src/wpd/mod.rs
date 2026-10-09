@@ -82,13 +82,19 @@ mod windows_backend {
         keys: IPortableDeviceKeyCollection,
         _device: IPortableDevice,
         friendly_name: Option<String>,
+        /// PnP device ID. Sensitive: never logged.
+        device_id: String,
         _com: ComApartment,
     }
 
     impl WpdFs {
         pub fn open(selection: Option<usize>) -> Result<Self> {
             let com = ComApartment::init_mta()?;
-            let (device, friendly_name) = device::open(selection)?;
+            let device::Opened {
+                device,
+                friendly_name,
+                device_id,
+            } = device::open(selection)?;
             // SAFETY: COM is initialized on this thread.
             unsafe {
                 let content = device
@@ -108,6 +114,7 @@ mod windows_backend {
                     keys,
                     _device: device,
                     friendly_name,
+                    device_id,
                     _com: com,
                 })
             }
@@ -137,6 +144,10 @@ mod windows_backend {
 
         fn read_to(&self, file: &Node, out: &mut dyn Write) -> Result<u64> {
             stream::read_to(&self.resources, &file.id, out)
+        }
+
+        fn device_id(&self) -> Option<String> {
+            Some(self.device_id.clone())
         }
     }
 }

@@ -134,8 +134,15 @@ fn client_info() -> Result<IPortableDeviceValues> {
     }
 }
 
+/// An open device, its friendly name and its PnP device ID.
+pub struct Opened {
+    pub device: IPortableDevice,
+    pub friendly_name: Option<String>,
+    pub device_id: String,
+}
+
 /// Open the selected device with read-only access.
-pub fn open(selection: Option<usize>) -> Result<(IPortableDevice, Option<String>)> {
+pub fn open(selection: Option<usize>) -> Result<Opened> {
     let mgr = manager()?;
     let ids = device_ids(&mgr)?;
     let index = select_device(selection, ids.len())?;
@@ -151,6 +158,10 @@ pub fn open(selection: Option<usize>) -> Result<(IPortableDevice, Option<String>
             .Open(id.pcwstr(), &info)
             .map_err(|e| wpd_err(format!("open device {index}"), &e, true))?;
         tracing::info!(index, name = friendly.as_deref(), "device opened read-only");
-        Ok((device, friendly))
+        Ok(Opened {
+            device,
+            friendly_name: friendly,
+            device_id: String::from_utf16_lossy(id.units()),
+        })
     }
 }

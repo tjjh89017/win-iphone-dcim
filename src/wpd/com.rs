@@ -53,6 +53,11 @@ impl WideZ {
         Self(units.iter().copied().chain(std::iter::once(0)).collect())
     }
 
+    /// The units without the terminating NUL.
+    pub fn units(&self) -> &[u16] {
+        &self.0[..self.0.len() - 1]
+    }
+
     /// Valid while `self` lives.
     pub fn pcwstr(&self) -> windows::core::PCWSTR {
         windows::core::PCWSTR(self.0.as_ptr())
