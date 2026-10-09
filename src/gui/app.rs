@@ -1514,7 +1514,7 @@ impl App {
                 Button::new(EXPLORER_COPY).shortcut_text("Ctrl+C"),
             )
             .on_hover_text(
-                "Explorer paste shows no speed and cannot resume. Use Copy to folder for that.",
+                "Explorer paste cannot resume an interrupted copy. Use Copy to folder for that.",
             )
             .clicked()
         {

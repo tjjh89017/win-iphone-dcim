@@ -343,8 +343,8 @@ Limits of this mode:
   the paste completes. If you close it during a paste, the GUI asks first
   ("Close anyway"); Explorer then reports an error for the remaining files.
 - The speed is the same as the CLI and the in-app copy, not faster.
-- Explorer paste shows no speed meter in the app and has no resume. "Copy to
-  folder" shows the speed and skips files that are already copied.
+- Explorer paste has no resume point for an interrupted copy. "Copy to
+  folder" skips files that are already copied.
 - Explorer decides replace or skip. There is no manifest, no verification
   and no incremental skip of verified files. Use "Copy to folder" or
   "Copy to..." for those.

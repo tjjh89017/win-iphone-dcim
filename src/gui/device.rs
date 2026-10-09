@@ -120,8 +120,6 @@ pub struct CopyProgress {
     pub bytes_done: u64,
     /// Bytes read from the device in this run, for the speed.
     pub bytes_transferred: u64,
-    /// The planner still lists folders, so the totals can grow.
-    pub scanning: bool,
     pub current: Option<CurrentFile>,
 }
 

@@ -125,7 +125,7 @@ fn browse_and_copy_the_checked_set() {
         _ => None,
     });
     let p = last_progress.unwrap();
-    assert_eq!((p.files_found, p.files_done, p.scanning), (2, 2, false));
+    assert_eq!((p.files_found, p.files_done), (2, 2));
     assert_eq!(p.bytes_done, 2048 + 6);
     // The totals come from the pre-scan, before the first file starts.
     let first = replies

@@ -9,7 +9,6 @@ fn progress(done: u64, transferred: u64, current: Option<(&str, u64)>, t: Instan
         bytes_found: 2000,
         bytes_done: done,
         bytes_transferred: transferred,
-        scanning: false,
         current: current.map(|(s, b)| CurrentFile {
             source: s.into(),
             size: Some(1000),
