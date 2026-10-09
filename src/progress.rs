@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::model::{human_size, human_speed};
+use crate::speed::{SpeedMeter, format_eta, format_speed};
 
 /// The bars that are on screen now. `LogWriter` suspends them.
 static ACTIVE: Mutex<Option<MultiProgress>> = Mutex::new(None);
@@ -58,6 +59,8 @@ struct Current {
     bytes: u64,
     start: Instant,
     last_event: Instant,
+    last_bar: Instant,
+    meter: SpeedMeter,
     bar: Option<ProgressBar>,
 }
 
@@ -65,7 +68,8 @@ pub struct Progress {
     mode: ProgressMode,
     multi: Option<MultiProgress>,
     overall: Option<ProgressBar>,
-    start: Instant,
+    /// Speed of the whole run.
+    meter: SpeedMeter,
     last_overall: Instant,
     files_found: u64,
     files_done: u64,
@@ -100,7 +104,7 @@ impl Progress {
             mode,
             multi,
             overall,
-            start: now,
+            meter: SpeedMeter::new(now),
             last_overall: now,
             files_found: 0,
             files_done: 0,
@@ -143,11 +147,11 @@ impl Progress {
             let (bar, template) = match size {
                 Some(len) => (
                     ProgressBar::new(len),
-                    "{wide_msg} [{bar:24}] {bytes}/{total_bytes} {percent:>3}% {binary_bytes_per_sec} ETA {eta}",
+                    "{wide_msg} [{bar:24}] {bytes}/{total_bytes} {percent:>3}% {prefix}",
                 ),
                 None => (
                     ProgressBar::new_spinner(),
-                    "{spinner} {wide_msg} {bytes} {binary_bytes_per_sec}",
+                    "{spinner} {wide_msg} {bytes} {prefix}",
                 ),
             };
             bar.set_style(
@@ -167,21 +171,30 @@ impl Progress {
             bytes: 0,
             start: now,
             last_event: now,
+            last_bar: now,
+            meter: SpeedMeter::new(now),
             bar,
         });
     }
 
     pub fn bytes(&mut self, n: u64) {
         self.bytes_transferred += n;
+        let now = Instant::now();
+        self.meter.add(n, now);
         let Some(cur) = self.current.as_mut() else {
             return;
         };
         cur.bytes += n;
+        cur.meter.add(n, now);
         if let Some(bar) = &cur.bar {
             bar.inc(n);
+            if now.duration_since(cur.last_bar) >= OVERALL_INTERVAL {
+                cur.last_bar = now;
+                bar.set_prefix(file_speed_text(cur, now));
+            }
         }
         if self.mode == ProgressMode::Events && cur.last_event.elapsed() >= EVENT_INTERVAL {
-            cur.last_event = Instant::now();
+            cur.last_event = now;
             tracing::info!(
                 target: "progress",
                 event = "file_progress",
@@ -189,6 +202,8 @@ impl Progress {
                 bytes = cur.bytes,
                 size = cur.size,
                 speed = human_speed(cur.bytes, cur.start.elapsed()).as_str(),
+                speed_bps = cur.meter.current(now) as u64,
+                avg_bps = cur.meter.average(now) as u64,
                 "{} {}",
                 cur.path,
                 human_size(cur.bytes)
@@ -204,6 +219,7 @@ impl Progress {
         if let Some(cur) = self.current.as_mut() {
             cur.bytes = 0;
             cur.start = Instant::now();
+            cur.meter.reset(cur.start);
             if let Some(bar) = &cur.bar {
                 bar.reset();
             }
@@ -253,14 +269,31 @@ impl Progress {
         };
         let more = if self.scanning { "+" } else { "" };
         let current = self.current.as_ref().map_or(0, |c| c.bytes);
+        let now = Instant::now();
+        let done = self.bytes_settled + current;
+        let eta = if self.scanning || self.bytes_found == 0 {
+            String::new()
+        } else {
+            self.meter
+                .eta(self.bytes_found.saturating_sub(done), now)
+                .map(|d| format!("  ETA {}", format_eta(d)))
+                .unwrap_or_default()
+        };
         bar.set_message(format!(
-            "files {}/{}{more}  {}/{}{more}  avg {}",
+            "files {}/{}{more}  {}/{}{more}  {} (avg {}){eta}",
             self.files_done,
             self.files_found,
-            human_size(self.bytes_settled + current),
+            human_size(done),
             human_size(self.bytes_found),
-            human_speed(self.bytes_transferred, self.start.elapsed()),
+            format_speed(self.meter.current(now)),
+            format_speed(self.meter.average(now)),
         ));
+        if let Some(cur) = self.current.as_mut()
+            && let Some(bar) = &cur.bar
+        {
+            cur.last_bar = now;
+            bar.set_prefix(file_speed_text(cur, now));
+        }
     }
 
     /// Remove the bars from the screen.
@@ -281,6 +314,18 @@ impl Progress {
         {
             *g = None;
         }
+    }
+}
+
+/// `12.3 MiB/s ETA 0:42` for the bar of the current file.
+fn file_speed_text(cur: &Current, now: Instant) -> String {
+    let speed = format_speed(cur.meter.current(now));
+    match cur
+        .size
+        .and_then(|s| cur.meter.eta(s.saturating_sub(cur.bytes), now))
+    {
+        Some(eta) => format!("{speed} ETA {}", format_eta(eta)),
+        None => speed,
     }
 }
 
