@@ -162,7 +162,8 @@ win-iphone-dcim/
 │       ├── device.rs          # device thread; owns the DeviceFs
 │       ├── selection.rs       # tree model, check marks, list selection
 │       ├── nav.rs             # Back/Forward/Up history and path bar segments
-│       ├── cache.rs           # open-file cache paths
+│       ├── cache.rs           # open-file cache paths and size limit
+│       ├── config.rs          # read-only win-iphone-dcim.toml and env overrides
 │       ├── filedesc.rs        # FILEGROUPDESCRIPTORW layout and flags for the Explorer paste
 │       ├── chunks.rs          # bounded chunk channel from the device thread to a paste stream
 │       ├── dataobject.rs      # IDataObject and IStream for the Explorer paste (Windows only)
@@ -416,7 +417,7 @@ Goal: give the user a window to select folders and files from the DCIM tree, the
 - [x] Show the DCIM tree with checkboxes. Show the file name, the size, and the folder path. Do not show the WPD object ID.
 - [x] Let the user open a folder in the tree and browse its files, as in a file manager. Show a list view with name, size, and date.
 - [x] Open a file with the Windows default application when the user double-clicks it. Windows applications cannot read a WPD stream directly. Download the file first to a local cache folder. Then call `ShellExecuteW` with the `open` verb on the cached file.
-- [x] Put the cache in `%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<relative path>`. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
+- [x] Put the cache in `<cache folder>\<device-id-hash>\<relative path>`. The cache folder is `cache` next to the GUI exe, or `cache_dir` from the read-only `win-iphone-dcim.toml` next to the exe or `WIN_IPHONE_DCIM_CACHE_DIR`. If it is not writable, use `%LOCALAPPDATA%\win-iphone-dcim\cache`. Keep the cache under a soft size limit (default 512 MiB): before a download, delete the least recently used files; never refuse the download. Keep the GUI portable: save no settings. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
 - [x] Give the cached file its original file name and extension. Then Windows picks the correct application for HEIC, MOV, DNG, and other types.
 - [x] Do not open the file from the GUI before the download is complete. A partial file can crash the viewer.
 - [x] Implement a COM `IDataObject` that offers `CFSTR_FILEDESCRIPTORW` and `CFSTR_FILECONTENTS`. Give each `FILEDESCRIPTORW` the relative path under `DCIM`, the `FD_FILESIZE` flag with the WPD size, and `FD_ATTRIBUTES` for folders. Supply each `CFSTR_FILECONTENTS` as an `IStream` that reads from the WPD stream on demand.

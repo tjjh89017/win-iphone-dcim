@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod chunks;
+pub mod config;
 pub mod copyview;
 pub mod device;
 pub mod filedesc;

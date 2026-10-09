@@ -205,11 +205,12 @@ pub struct DeviceHandle {
 }
 
 impl DeviceHandle {
-    /// Start the device thread. `wake` runs after each reply, so the UI
-    /// can repaint.
+    /// Start the device thread. `cache_max` is the soft size limit of the
+    /// cache. `wake` runs after each reply, so the UI can repaint.
     pub fn spawn(
         connector: Box<dyn Connector>,
         cache_base: Option<PathBuf>,
+        cache_max: u64,
         wake: Box<dyn Fn() + Send>,
     ) -> Self {
         let (tx, requests) = mpsc::channel();
@@ -229,6 +230,7 @@ impl DeviceHandle {
                 let mut thread = DeviceThread {
                     connector,
                     cache_base,
+                    cache_max,
                     fs: None,
                     nodes: HashMap::new(),
                     device_key: None,
@@ -283,6 +285,8 @@ impl Out {
 struct DeviceThread {
     connector: Box<dyn Connector>,
     cache_base: Option<PathBuf>,
+    /// Soft size limit of the cache, in bytes.
+    cache_max: u64,
     fs: Option<Box<dyn DeviceFs>>,
     /// Nodes from earlier listings, by device path.
     nodes: HashMap<String, Node>,
@@ -573,9 +577,15 @@ impl DeviceThread {
         }
     }
 
+    fn cache_base(&self) -> Result<PathBuf> {
+        self.cache_base.clone().map_or_else(cache::base_dir, Ok)
+    }
+
     fn device_cache(&self) -> Result<PathBuf> {
-        let base = self.cache_base.clone().map_or_else(cache::base_dir, Ok)?;
-        Ok(cache::device_dir(&base, self.device_key.as_deref()))
+        Ok(cache::device_dir(
+            &self.cache_base()?,
+            self.device_key.as_deref(),
+        ))
     }
 
     /// Download `path` to the cache, or reuse a complete cached copy.
@@ -584,9 +594,22 @@ impl DeviceThread {
         if node.is_folder {
             return Err(Error::NotAFolder(path.to_owned()));
         }
-        let local = cache::file_path(&self.device_cache()?, path)?;
+        let base = self.cache_base()?;
+        let local = cache::file_path(&cache::device_dir(&base, self.device_key.as_deref()), path)?;
         if cache::is_fresh(&local, node.size) {
+            cache::touch(&local);
             return Ok((local, true));
+        }
+        if let Some(size) = node.size {
+            let room = cache::make_room(&base, size, self.cache_max);
+            if room.deleted > 0 {
+                tracing::debug!(
+                    "cache: deleted {} files ({} bytes), {} bytes used",
+                    room.deleted,
+                    room.freed,
+                    room.used
+                );
+            }
         }
         let target = to_verbatim(&local);
         if let Some(parent) = target.parent() {
@@ -796,9 +819,14 @@ mod tests {
     }
 
     fn handle(cache: &Path) -> DeviceHandle {
+        handle_with_limit(cache, u64::MAX)
+    }
+
+    fn handle_with_limit(cache: &Path, cache_max: u64) -> DeviceHandle {
         DeviceHandle::spawn(
             Box::new(FakeConnector),
             Some(cache.to_path_buf()),
+            cache_max,
             Box::new(|| {}),
         )
     }
@@ -1093,6 +1121,29 @@ mod tests {
             path: "/Internal Storage/DCIM".into(),
         });
         assert!(matches!(next(&h), Reply::DownloadFailed { .. }));
+    }
+
+    fn download(h: &DeviceHandle, path: &str) -> PathBuf {
+        h.send(Request::Download { path: path.into() });
+        match until(h, |r| !matches!(r, Reply::DownloadProgress { .. })).pop() {
+            Some(Reply::Downloaded { local, .. }) => local,
+            _ => panic!("download of {path} failed"),
+        }
+    }
+
+    #[test]
+    fn download_evicts_older_files_over_the_limit() {
+        let cache = tempfile::tempdir().unwrap();
+        let h = handle_with_limit(cache.path(), 2050);
+        let mut tree = open(&h);
+        load(&h, &mut tree, "/");
+        let mov = download(&h, "/Internal Storage/DCIM/202601_a/IMG_0002.MOV");
+        assert!(mov.exists());
+        let heic = download(&h, "/Internal Storage/DCIM/202601_a/IMG_0001.HEIC");
+        assert!(!mov.exists());
+        assert!(heic.exists());
+        let other = download(&h, "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC");
+        assert!(heic.exists() && other.exists());
     }
 
     #[test]

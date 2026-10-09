@@ -17,6 +17,7 @@ use windows::Win32::System::Com::IDataObject;
 
 use super::cache;
 use super::chunks::Pending;
+use super::config::{self, Config};
 use super::copyview::{CopyTracker, EndState, PasteFile, PasteTracker};
 use super::dataobject::{self, DataObject, PasteShared};
 use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
@@ -41,17 +42,6 @@ const EXPLORER_COPY: &str = "Copy (paste in Explorer)";
 /// Pointer travel before a drag from a selected row starts `DoDragDrop`.
 const DRAG_DISTANCE: f32 = 6.0;
 /// Largest scroll step per frame while a rubber band is past an edge.
-/// The storage key of the "Clear cache on exit" setting.
-const CLEAR_CACHE_KEY: &str = "clear_cache_on_exit";
-
-/// Delete the cache of all devices. Errors are only logged.
-fn clear_cache_folder() {
-    if let Ok(base) = cache::base_dir() {
-        let left = cache::clear_all(&base);
-        tracing::debug!("cache cleared, {left} entries left");
-    }
-}
-
 const BAND_SCROLL_MAX: f32 = 30.0;
 
 pub fn run() -> ExitCode {
@@ -71,17 +61,16 @@ pub fn run() -> ExitCode {
         options,
         Box::new(|cc| {
             add_fallback_fonts(&cc.egui_ctx);
+            let exe_dir = config::exe_dir();
+            let config = Config::load(exe_dir.as_deref());
+            let cache_base = cache::choose_base(config.cache_dir.as_deref(), exe_dir.as_deref());
+            let mut app = App::new(&cc.egui_ctx, cache_base, config.cache_max);
+            app.clear_cache_on_exit = config.clear_cache_on_exit;
             // A file that a viewer still holds cannot be deleted at exit,
             // so the cache is cleared at the start as well.
-            let clear_on_exit = cc
-                .storage
-                .and_then(|s| s.get_string(CLEAR_CACHE_KEY))
-                .is_none_or(|v| v != "false");
-            if clear_on_exit {
-                clear_cache_folder();
+            if app.clear_cache_on_exit {
+                app.clear_cache_folder();
             }
-            let mut app = App::new(&cc.egui_ctx);
-            app.clear_cache_on_exit = clear_on_exit;
             Ok(Box::new(app))
         }),
     );
@@ -190,6 +179,10 @@ struct App {
     tree: Option<Tree>,
     /// The cache folder of the open device.
     cache_dir: Option<PathBuf>,
+    /// The cache base folder of all devices. `None` if no folder is usable.
+    cache_base: Option<PathBuf>,
+    /// The soft size limit of the cache, in bytes.
+    cache_max: u64,
     loading: HashSet<String>,
     /// Folders whose subfolders open when they are listed ("Expand all").
     expanding: HashSet<String>,
@@ -237,7 +230,7 @@ struct App {
 }
 
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(ctx: &egui::Context, cache_base: Option<PathBuf>, cache_max: u64) -> Self {
         let mut app = Self {
             device: None,
             ctx: ctx.clone(),
@@ -245,6 +238,8 @@ impl App {
             current: None,
             tree: None,
             cache_dir: None,
+            cache_base: cache_base.clone(),
+            cache_max,
             loading: HashSet::new(),
             expanding: HashSet::new(),
             folder: None,
@@ -281,7 +276,8 @@ impl App {
                         worker,
                         timeout: DEFAULT_TIMEOUT,
                     }),
-                    None,
+                    cache_base,
+                    cache_max,
                     Box::new(move || wake_ctx.request_repaint()),
                 );
                 handle.send(Request::ListDevices);
@@ -295,6 +291,26 @@ impl App {
             }
         }
         app
+    }
+
+    /// Delete the cache of all devices. Errors are only logged.
+    fn clear_cache_folder(&self) {
+        if let Some(base) = &self.cache_base {
+            let left = cache::clear_all(base);
+            tracing::debug!("cache cleared, {left} entries left");
+        }
+    }
+
+    /// The cache folder and the size limit, for tooltips.
+    fn cache_info(&self) -> String {
+        let dir = self
+            .cache_base
+            .as_ref()
+            .map_or_else(|| "(none)".into(), |p| p.display().to_string());
+        format!(
+            "Cache folder: {dir}\nSize limit: {} (soft)",
+            human_size(self.cache_max)
+        )
     }
 
     fn send(&self, request: Request) {
@@ -1020,6 +1036,10 @@ impl App {
             }
             if ui
                 .add_enabled(self.tree.is_some(), Button::new("Clear cache"))
+                .on_hover_text(format!(
+                    "Delete the cache of the open device\n{}",
+                    self.cache_info()
+                ))
                 .clicked()
             {
                 self.send(Request::ClearCache);
@@ -1141,6 +1161,7 @@ impl App {
                 self.cached(path).is_some(),
                 Button::new("Open cache folder"),
             )
+            .on_hover_text(self.cache_info())
             .clicked()
         {
             actions.push(Action::OpenCacheFolder(path.to_owned()));
@@ -1642,13 +1663,9 @@ impl eframe::App for App {
         }
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(CLEAR_CACHE_KEY, self.clear_cache_on_exit.to_string());
-    }
-
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if self.clear_cache_on_exit {
-            clear_cache_folder();
+            self.clear_cache_folder();
         }
         // A data object left on the clipboard would point to a dead process.
         if let Some(obj) = self.clipboard.take() {

@@ -265,8 +265,10 @@ The window:
 
 The cache of downloaded files is deleted when the GUI closes and when it
 starts (files that a viewer still holds are left). Untick "Clear cache on
-exit" in the top bar to keep it; the setting is saved. The "Clear cache"
-button deletes the cache of the open device at any time. Copy destinations
+exit" in the top bar to keep it for this run; the setting is not saved (see
+[Portable](#portable) for the default). The "Clear cache" button deletes the
+cache of the open device at any time. Its tooltip, and the tooltip of "Open
+cache folder", show the cache folder and the size limit. Copy destinations
 and manifests are never touched.
 
 Right-click menus:
@@ -294,10 +296,10 @@ stops after the current file.
 
 Double-click on a file downloads it to the cache, then opens it with the
 default Windows application. The file never opens before the download is
-complete. The cache is
-`%LOCALAPPDATA%\win-iphone-dcim\cache\<device-id-hash>\<device path>`, with
-the original folder and file names. A cached file is reused while its size
-matches the device size. Clear cache deletes the cache folder of the open
+complete. The cache is `<cache folder>\<device-id-hash>\<device path>`,
+with the original folder and file names (see [Portable](#portable) for the
+cache folder). A cached file is reused while its size matches the device
+size. Clear cache deletes the cache folder of the open
 device. Changes in the viewer do not go back to the iPhone. HEIC photos and
 HEVC videos need the "HEIF Image Extensions" and "HEVC Video Extensions" from
 the Microsoft Store; the GUI shows this hint when Windows has no application
@@ -461,6 +463,35 @@ results.
 | 2 | Command-line error (bad arguments, more than one device and no `-d`, DEST is not a folder) |
 | 3 | Device not found, access denied, or the device cannot be opened |
 | 4 | Internal error (unexpected WPD error, device worker failure, unsupported platform) |
+
+### Portable
+
+The GUI keeps no settings and writes nothing to the registry or to
+`%APPDATA%`. It writes only:
+
+- the chosen copy destination and its manifest, and
+- the open-file cache, by default in a `cache` folder next to
+  `win-iphone-dcim-gui.exe`. If that folder is not writable (for example
+  under `Program Files`), the GUI logs one line and uses
+  `%LOCALAPPDATA%\win-iphone-dcim\cache`.
+
+The cache has a soft size limit of 512 MiB. Before a download, the GUI
+deletes the least recently used cached files until the new file fits. A
+file that a viewer holds open is skipped. The download always proceeds,
+also when the file alone is larger than the limit.
+
+An optional `win-iphone-dcim.toml` next to the GUI exe changes the
+defaults. The GUI only reads it. The CLI ignores it.
+
+```toml
+cache_dir = "cache"          # a relative path starts at the exe folder
+cache_max = "2GiB"           # "512MiB", "2GiB", "5GB", or bytes: 1073741824
+clear_cache_on_exit = false  # default true; also clears at start
+```
+
+Environment variables override the file: `WIN_IPHONE_DCIM_CACHE_DIR`,
+`WIN_IPHONE_DCIM_CACHE_MAX`, `WIN_IPHONE_DCIM_CLEAR_CACHE_ON_EXIT` (`true`,
+`false`, `1`, `0`). A bad value is ignored with a warning in the log.
 
 ## Paths
 
