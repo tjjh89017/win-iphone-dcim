@@ -320,7 +320,8 @@ Do not run cargo on the host for this repo. Use the Docker wrapper
 ```sh
 scripts/dev.sh                     # x64 release build
 scripts/dev.sh xwin build --release --target aarch64-pc-windows-msvc   # ARM64 release build
-scripts/dev.sh test                # unit and end-to-end tests (Linux container)
+scripts/dev.sh test                # unit tests (Linux container)
+scripts/dev.sh test --features fake-device   # unit and end-to-end tests
 scripts/dev.sh xwin check --target x86_64-pc-windows-msvc
 scripts/dev.sh xwin clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
@@ -340,7 +341,10 @@ on Windows with an iPhone attached.
 - The commands use the `DeviceFs` trait. Unit tests use the in-memory fake in
   `device_fs::fake`, so CI does not need an iPhone. `tests/e2e.rs` runs the
   built executable with `WIN_IPHONE_DCIM_FAKE_FS=1`, so the worker serves the
-  fake device. That variable is for tests only.
+  fake device. The fake is compiled into a binary only with the `fake-device`
+  cargo feature, and `tests/e2e.rs` runs only with that feature. Release
+  binaries do not enable it, so they do not contain the fake device, and the
+  variable has no effect on them.
 
 ## License
 

@@ -17,6 +17,8 @@ pub struct DeviceInfo {
 pub struct ObjectId(pub Vec<u16>);
 
 impl ObjectId {
+    /// An id from text. The fake device and tests build ids this way.
+    #[cfg(any(test, feature = "fake-device"))]
     pub fn new(s: &str) -> Self {
         Self(s.encode_utf16().collect())
     }

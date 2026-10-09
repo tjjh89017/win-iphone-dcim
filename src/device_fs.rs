@@ -69,14 +69,16 @@ pub fn find_child<'a>(children: &'a [Node], component: &str) -> Option<&'a Node>
 /// activity) or a crash. Without it they live in this process, which is
 /// for debugging only.
 ///
-/// Tests set `WIN_IPHONE_DCIM_FAKE_FS=1` to get the in-memory fake device
-/// instead of WPD, in the worker or, without `isolate`, in this process.
+/// With the `fake-device` feature or in unit tests,
+/// `WIN_IPHONE_DCIM_FAKE_FS=1` gives the in-memory fake device instead of
+/// WPD, in the worker or, without `isolate`, in this process.
 pub fn open_device_fs(
     selection: Option<usize>,
     timeout: Duration,
     isolate: bool,
 ) -> Result<Box<dyn DeviceFs>> {
     if !isolate {
+        #[cfg(any(test, feature = "fake-device"))]
         if fake::requested() {
             return Ok(Box::new(fake::from_env()));
         }
@@ -89,6 +91,7 @@ pub fn open_device_fs(
 /// List the devices, in a short-lived worker process with `isolate`.
 pub fn list_devices(timeout: Duration, isolate: bool) -> Result<Vec<DeviceInfo>> {
     if !isolate {
+        #[cfg(any(test, feature = "fake-device"))]
         if fake::requested() {
             return Ok(fake::devices());
         }
@@ -218,10 +221,12 @@ impl DeviceFs for RemoteFs {
     }
 }
 
+#[cfg(any(test, feature = "fake-device"))]
 pub mod fake {
-    //! In-memory device for tests. The release binary also contains it so
-    //! that end-to-end tests can drive the real executable, but only the
-    //! test environment variables below turn it on.
+    //! In-memory device for tests. Unit tests always have it. A binary has
+    //! it only with the `fake-device` feature, which the end-to-end tests
+    //! need. Release builds do not enable the feature. Only the test
+    //! environment variables below turn it on.
 
     use std::path::PathBuf;
 

@@ -389,7 +389,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 - [x] Run fmt/clippy/test/build on GitHub Actions `windows-latest`.
 - [x] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation.
 - [ ] Test on a minimum of two iPhone/iOS combinations. If only one combination is available, state the verification scope clearly.
-- [x] Add mock backend / fixture tests for use without an iPhone. CI must not depend on hardware.
+- [x] Add mock backend / fixture tests for use without an iPhone, behind the `fake-device` cargo feature, not in release builds. CI must not depend on hardware.
 
 Verification scope as of 2026-10-09: no real-device test has run yet. All tests use the in-memory fake device.
 

@@ -14,6 +14,15 @@ categories = ["command-line-utilities"]
 name = "win-iphone-dcim"
 path = "src/main.rs"
 
+[[test]]
+name = "e2e"
+required-features = ["fake-device"]
+
+[features]
+default = []
+# In-memory fake device for the end-to-end tests. Release builds leave it off.
+fake-device = []
+
 [dependencies]
 blake3 = "1.8.7"
 clap = { version = "4.6", features = ["derive"] }

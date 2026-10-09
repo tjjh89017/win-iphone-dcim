@@ -1,5 +1,5 @@
 name: 'Lint'
-description: 'Check formatting with rustfmt and run clippy with warnings denied.'
+description: 'Check formatting with rustfmt and run clippy with warnings denied, with and without the fake-device feature.'
 
 runs:
   using: 'composite'
@@ -11,3 +11,7 @@ runs:
     - name: Run clippy
       shell: pwsh
       run: cargo clippy --all-targets -- -D warnings
+
+    - name: Run clippy with the fake-device feature
+      shell: pwsh
+      run: cargo clippy --all-targets --features fake-device -- -D warnings

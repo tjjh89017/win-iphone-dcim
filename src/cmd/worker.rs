@@ -9,7 +9,9 @@
 
 use std::io;
 
-use crate::device_fs::{DeviceFs, fake};
+use crate::device_fs::DeviceFs;
+#[cfg(any(test, feature = "fake-device"))]
+use crate::device_fs::fake;
 use crate::error::{Error, Result};
 use crate::ipc::{self, Backend};
 use crate::model::DeviceInfo;
@@ -47,9 +49,11 @@ impl Backend for WpdBackend {
     }
 }
 
-/// `WIN_IPHONE_DCIM_FAKE_FS=1` serves the in-memory fake device for
-/// tests. Otherwise WPD, which is available only on Windows.
+/// With the `fake-device` feature or in unit tests,
+/// `WIN_IPHONE_DCIM_FAKE_FS=1` serves the in-memory fake device. Otherwise
+/// WPD, which is available only on Windows.
 fn backend() -> Result<Box<dyn Backend>> {
+    #[cfg(any(test, feature = "fake-device"))]
     if fake::requested() {
         return Ok(Box::new(FakeBackend));
     }
@@ -60,8 +64,10 @@ fn backend() -> Result<Box<dyn Backend>> {
     }
 }
 
+#[cfg(any(test, feature = "fake-device"))]
 struct FakeBackend;
 
+#[cfg(any(test, feature = "fake-device"))]
 impl Backend for FakeBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
         Ok(fake::devices())
