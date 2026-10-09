@@ -165,7 +165,7 @@ You can start with a single binary. Start the worker with the hidden `worker` su
 win-iphone-dcim.exe devices
 win-iphone-dcim.exe ls   [-d <device>] [-l] [-R] [--json] [PATH...]
 win-iphone-dcim.exe tree [-d <device>] [-L <depth>] [--json] [PATH]
-win-iphone-dcim.exe cp   [-d <device>] [-r] [-n] [--dry-run] [--verify size|local-hash] SRC... DEST
+win-iphone-dcim.exe cp   [-d <device>] [-r] [-n] [-p] [-a] [--dry-run] [--verify size|local-hash] SRC... DEST
 win-iphone-dcim.exe verify DEST
 ```
 
@@ -216,6 +216,8 @@ win-iphone-dcim.exe verify DEST
 | --- | --- | --- |
 | `-r` | false | Copy folders recursively. A folder `SRC` needs this flag |
 | `-n` | false | Do not overwrite. Skip every existing target file and report it |
+| `-p` | false | Preserve timestamps. After the commit, set the local modified time, and the created time where Windows allows it, from `WPD_OBJECT_DATE_MODIFIED` and `WPD_OBJECT_DATE_CREATED`. If the device gives no date, keep the copy time and log it |
+| `-a` | false | Archive mode. Equal to `-r -p`. Permissions, ownership and links do not exist on the device, so `-a` preserves only timestamps |
 | `--dry-run` | false | Enumerate and print the copy plan only. Do not write files |
 | `--verify size\|local-hash` | size | Verification mode for the incremental rules of section 7 |
 
@@ -328,7 +330,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 - For names that come from the device: sanitize or reject absolute paths, `..`, drive prefixes, UNC paths, invalid Windows file names, reserved names (such as CON, NUL), and path traversal.
 - Treat case-insensitive collisions on Windows, duplicate file names, and illegal characters as errors. **By default, report an error and stop the transfer of that file**. Never overwrite silently. Never rename silently and then call the result "structure fully preserved".
 - Do not use EXIF dates to make folders or to rename files.
-- Do not use the modification time as the only criterion. The file size and time from the device can be missing or incorrect.
+- Do not use the modification time as the only criterion. The file size and time from the device can be missing or incorrect. Timestamps that `-p` preserves are metadata only. Do not use them in skip or verify decisions.
 - Do not delete extra files at the destination by default. This prevents accidental loss of past backups.
 - Do not show the full value of sensitive device identifiers in logs. The user can select a diagnostic mode.
 - Set the iPhone "Transfer to Mac or PC" setting to **Keep Originals**. Also verify the actual transferred content with samples.
@@ -365,6 +367,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 - [ ] Write to a safe `.part` file. Commit with no-clobber after completion.
 - [ ] Verify the copy size. Show an error summary. Return a non-zero exit code for failures.
 - [ ] Implement dry-run and logging. Add path safety tests.
+- [ ] Implement `-p` and `-a`. Set file times with `SetFileTime` through the `\\?\` path.
 
 ### Phase 2 — Incremental and reliability
 
@@ -426,6 +429,7 @@ Known limits:
 | DEST plus relative path is longer than 260 characters | The tool creates the file with the `\\?\` prefix. No `ERROR_PATH_NOT_FOUND` occurs |
 | A folder or file name contains CJK or emoji characters | The name is identical on the device and at DEST |
 | Double-click a HEIC file in the GUI | The tool downloads the file to the cache and opens it with the default Windows application. The device file is unchanged |
+| `cp -a` on a folder | Every copied file has the device modified time. The skip decision on a second run does not depend on it. |
 | `cp -r SRC DEST` and `cp -r SRC/ DEST` | The first creates `DEST\<name>`. The second copies the contents into `DEST`. Add tests for both |
 | Paste a selection into Explorer when a file already exists at the target | Explorer shows its own Replace or Skip dialog. The tool does not add a dialog |
 | Close the GUI during an Explorer paste | Explorer reports a copy error. No `.part` or partial file remains at the target as a complete file |
