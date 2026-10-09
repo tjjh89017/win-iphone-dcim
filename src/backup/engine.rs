@@ -353,7 +353,14 @@ impl Run<'_> {
     fn enter_dir(&mut self, target: &Path) -> Result<()> {
         match std::fs::metadata(target) {
             Ok(m) if m.is_dir() => {
-                for part in leftover_parts(target) {
+                let start = Instant::now();
+                let parts = leftover_parts(target);
+                tracing::debug!(
+                    "leftover_parts {}: {} ms",
+                    target.display(),
+                    start.elapsed().as_millis()
+                );
+                for part in parts {
                     self.warn(format!(
                         "leftover partial file {} is not a complete file; it is left in place",
                         part.display()

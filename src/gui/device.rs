@@ -759,9 +759,11 @@ struct ChannelSink<'a> {
     planned: (u64, u64),
     last: Instant,
     notes: Vec<(Note, String)>,
-    /// When the device thread got the copy request. `None` after the
-    /// first file is logged.
-    started: Option<Instant>,
+    /// When the device thread got the copy request.
+    started: Instant,
+    /// The first skip and the first transfer are logged.
+    logged_settle: bool,
+    logged_start: bool,
 }
 
 impl<'a> ChannelSink<'a> {
@@ -779,7 +781,9 @@ impl<'a> ChannelSink<'a> {
             planned: (0, 0),
             last: Instant::now(),
             notes: Vec::new(),
-            started: Some(started),
+            started,
+            logged_settle: false,
+            logged_start: false,
         }
     }
 
@@ -798,12 +802,19 @@ impl<'a> ChannelSink<'a> {
         }
     }
 
-    /// Log the time from the request to the first file, once.
-    fn first_file(&mut self, what: &str) {
-        if let Some(started) = self.started.take() {
+    /// Log the time from the request to the first skipped file and to the
+    /// first transfer, once each.
+    fn first_file(&mut self, transfer: bool) {
+        let (logged, what) = if transfer {
+            (&mut self.logged_start, "file_start")
+        } else {
+            (&mut self.logged_settle, "settled (skip)")
+        };
+        if !std::mem::replace(logged, true) {
             tracing::debug!(
-                "copy: first file {what} {} ms after the request",
-                started.elapsed().as_millis()
+                "copy: first {what} {} ms after the request, {} files done",
+                self.started.elapsed().as_millis(),
+                self.progress.files_done
             );
         }
     }
@@ -823,14 +834,14 @@ impl ProgressSink for ChannelSink<'_> {
     }
 
     fn settled(&mut self, size: Option<u64>) {
-        self.first_file("settled");
+        self.first_file(false);
         self.progress.files_done += 1;
         self.progress.bytes_done += size.unwrap_or(0);
         self.push(false);
     }
 
     fn file_start(&mut self, source: &str, size: Option<u64>) {
-        self.first_file("starts");
+        self.first_file(true);
         self.progress.current = Some(CurrentFile {
             source: source.to_owned(),
             size,

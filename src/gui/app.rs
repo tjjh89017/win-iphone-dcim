@@ -188,6 +188,93 @@ struct Band {
     y: f32,
 }
 
+/// What the folder dialog picks a folder for.
+enum DialogFor {
+    /// Copy these paths into the folder.
+    CopyTo(Vec<String>),
+    /// Set the destination.
+    Destination,
+}
+
+/// A folder dialog that runs on its own thread.
+struct FolderDialog {
+    purpose: DialogFor,
+    /// `Some(folder)`, or `None` if the user cancelled.
+    result: Arc<Pending<Option<PathBuf>>>,
+}
+
+/// Show the folder dialog on a new thread. The dialog runs a modal message
+/// loop, and the shell can take seconds to close it on a large folder. On
+/// the UI thread that would stop the window from painting.
+fn pick_folder(start: Option<PathBuf>, ctx: egui::Context) -> Arc<Pending<Option<PathBuf>>> {
+    let slot = Arc::new(Pending::default());
+    let result = Arc::clone(&slot);
+    let spawned = std::thread::Builder::new()
+        .name("folder dialog".into())
+        .spawn(move || {
+            let opened = Instant::now();
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(dir) = start {
+                dialog = dialog.set_directory(dir);
+            }
+            let dir = dialog.pick_folder();
+            tracing::debug!(
+                "folder dialog: pick_folder took {} ms, {}",
+                opened.elapsed().as_millis(),
+                if dir.is_some() {
+                    "folder picked"
+                } else {
+                    "cancelled"
+                }
+            );
+            result.set(dir);
+            ctx.request_repaint();
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("cannot start the folder dialog thread: {e}");
+        slot.set(None);
+    }
+    slot
+}
+
+/// The time of each phase of one frame, for the slow-frame log.
+#[derive(Default)]
+struct Phases {
+    poll: Duration,
+    menu_bar: Duration,
+    top_bar: Duration,
+    bottom: Duration,
+    tree: Duration,
+    file_list: Duration,
+    windows: Duration,
+    apply: Duration,
+}
+
+impl Phases {
+    fn text(&self) -> String {
+        format!(
+            "poll {} ms, menu bar {} ms, top bar {} ms, bottom panel and log {} ms, \
+             tree {} ms, file list {} ms, windows {} ms, actions {} ms",
+            self.poll.as_millis(),
+            self.menu_bar.as_millis(),
+            self.top_bar.as_millis(),
+            self.bottom.as_millis(),
+            self.tree.as_millis(),
+            self.file_list.as_millis(),
+            self.windows.as_millis(),
+            self.apply.as_millis()
+        )
+    }
+}
+
+/// Run `f` and add its time to `slot`.
+fn timed<T>(slot: &mut Duration, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    *slot += start.elapsed();
+    out
+}
+
 struct Download {
     path: String,
     bytes: u64,
@@ -258,6 +345,11 @@ struct App {
     /// When this frame started, and the replies it handled.
     frame_start: Instant,
     frame_replies: usize,
+    phases: Phases,
+    /// The open folder dialog.
+    folder_dialog: Option<FolderDialog>,
+    /// When this frame took the folder dialog result.
+    dialog_done: Option<Instant>,
 }
 
 /// Bytes in a MiB, for the cache size limit.
@@ -305,6 +397,9 @@ impl App {
             release_pointer: false,
             frame_start: Instant::now(),
             frame_replies: 0,
+            phases: Phases::default(),
+            folder_dialog: None,
+            dialog_done: None,
         };
         match WorkerCommand::cli_next_to_current_exe() {
             Ok(worker) => {
@@ -327,6 +422,9 @@ impl App {
                 app.status = e.to_string();
                 app.push_log(format!("[error] {e}"));
             }
+        }
+        if let Some(msg) = crate::gui::logging_error() {
+            app.status = format!("Log file: {msg}");
         }
         app
     }
@@ -950,28 +1048,13 @@ impl App {
                     None => self.status = format!("{} is not in the cache", file_name(&path)),
                 },
                 Action::CopyTo(paths) => {
-                    if !paths.is_empty() && !self.copying {
-                        let mut dialog = rfd::FileDialog::new();
-                        if let Some(dest) = &self.dest {
-                            dialog = dialog.set_directory(dest);
-                        }
-                        let dir = dialog.pick_folder();
-                        // The slow-frame check measures the work after the
-                        // dialog, not the time the user spent in it.
-                        tracing::debug!(
-                            "folder dialog returned {} ms into the frame",
-                            self.frame_start.elapsed().as_millis()
-                        );
-                        self.frame_start = Instant::now();
-                        if let Some(dir) = dir {
-                            self.dest = Some(dir.clone());
-                            self.start_copy(CopySet::Paths(paths), dir);
-                        }
+                    if !paths.is_empty() && !self.busy() {
+                        self.open_folder_dialog(DialogFor::CopyTo(paths));
                     }
                 }
                 Action::CopyToDest(paths) => {
                     if !paths.is_empty()
-                        && !self.copying
+                        && !self.busy()
                         && let Some(dest) = self.dest.clone()
                     {
                         self.start_copy(CopySet::Paths(paths), dest);
@@ -1007,12 +1090,12 @@ impl App {
                     self.send(Request::ListDevices);
                 }
                 Action::PickDestination => {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.dest = Some(dir);
+                    if self.folder_dialog.is_none() {
+                        self.open_folder_dialog(DialogFor::Destination);
                     }
                 }
                 Action::CopyChecked => {
-                    if !self.copying {
+                    if !self.busy() {
                         self.copy_checked();
                     }
                 }
@@ -1033,6 +1116,47 @@ impl App {
                 Action::ShowPreferences => self.preferences = true,
                 Action::Exit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
+        }
+    }
+
+    /// A copy runs or a folder dialog is open: no new copy starts.
+    fn busy(&self) -> bool {
+        self.copying || self.folder_dialog.is_some()
+    }
+
+    fn open_folder_dialog(&mut self, purpose: DialogFor) {
+        let start = match purpose {
+            DialogFor::CopyTo(_) => self.dest.clone(),
+            DialogFor::Destination => None,
+        };
+        tracing::debug!(
+            "folder dialog: opened {} ms into the frame",
+            self.frame_start.elapsed().as_millis()
+        );
+        self.status = "Choose a folder in the folder dialog".into();
+        self.folder_dialog = Some(FolderDialog {
+            purpose,
+            result: pick_folder(start, self.ctx.clone()),
+        });
+    }
+
+    /// Act on the folder dialog result once the dialog is closed. Never
+    /// waits.
+    fn finish_folder_dialog(&mut self) {
+        let Some(dir) = self.folder_dialog.as_ref().and_then(|d| d.result.get()) else {
+            return;
+        };
+        let Some(dialog) = self.folder_dialog.take() else {
+            return;
+        };
+        self.dialog_done = Some(Instant::now());
+        self.status.clear();
+        let Some(dir) = dir else {
+            return;
+        };
+        self.dest = Some(dir.clone());
+        if let DialogFor::CopyTo(paths) = dialog.purpose {
+            self.start_copy(CopySet::Paths(paths), dir);
         }
     }
 
@@ -1098,7 +1222,7 @@ impl App {
             highlighted: self.rows.len(),
             one_cached_file,
             rows,
-            copying: self.copying,
+            copying: self.busy(),
             explorer: self.paste.is_some(),
         }
     }
@@ -1644,7 +1768,7 @@ impl App {
         let state = MenuState {
             has_dest: self.dest.is_some(),
             highlighted: targets.len(),
-            copying: self.copying,
+            copying: self.busy(),
             ..Default::default()
         };
         if self.copy_to_dest_button(ui, state).clicked() {
@@ -1652,7 +1776,7 @@ impl App {
             ui.close();
         }
         if ui
-            .add_enabled(!self.copying, Button::new("Copy to..."))
+            .add_enabled(!self.busy(), Button::new("Copy to..."))
             .on_hover_text("Pick a folder, then copy like cp -r -p")
             .clicked()
         {
@@ -2068,7 +2192,12 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_start = Instant::now();
-        self.frame_replies = self.poll();
+        self.phases = Phases::default();
+        self.dialog_done = None;
+        let mut poll = Duration::ZERO;
+        self.frame_replies = timed(&mut poll, || self.poll());
+        self.phases.poll = poll;
+        self.finish_folder_dialog();
         self.finish_explorer_copy();
         if ctx.input(|i| i.viewport().close_requested()) && !self.close_anyway && self.paste_busy()
         {
@@ -2105,23 +2234,43 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut actions = Vec::new();
-        let state = self.menu_state();
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, state, &mut actions));
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, state, &mut actions));
-        egui::Panel::bottom("bottom")
-            .resizable(true)
-            .default_size(180.0)
-            .show(ui, |ui| self.bottom_panel(ui));
-        egui::Panel::left("tree")
-            .resizable(true)
-            .default_size(340.0)
-            .show(ui, |ui| self.tree_panel(ui, &mut actions));
-        egui::CentralPanel::default().show(ui, |ui| self.file_list(ui, &mut actions));
+        let mut t = Duration::ZERO;
+        let state = timed(&mut t, || self.menu_state());
+        timed(&mut t, || {
+            egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, state, &mut actions))
+        });
+        self.phases.menu_bar = std::mem::take(&mut t);
+        timed(&mut t, || {
+            egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, state, &mut actions))
+        });
+        self.phases.top_bar = std::mem::take(&mut t);
+        timed(&mut t, || {
+            egui::Panel::bottom("bottom")
+                .resizable(true)
+                .default_size(180.0)
+                .show(ui, |ui| self.bottom_panel(ui))
+        });
+        self.phases.bottom = std::mem::take(&mut t);
+        timed(&mut t, || {
+            egui::Panel::left("tree")
+                .resizable(true)
+                .default_size(340.0)
+                .show(ui, |ui| self.tree_panel(ui, &mut actions))
+        });
+        self.phases.tree = std::mem::take(&mut t);
+        timed(&mut t, || {
+            egui::CentralPanel::default().show(ui, |ui| self.file_list(ui, &mut actions))
+        });
+        self.phases.file_list = std::mem::take(&mut t);
         let ctx = ui.ctx().clone();
-        self.properties_window(&ctx);
-        self.about_window(&ctx);
-        self.preferences_window(&ctx);
-        self.apply(actions);
+        timed(&mut t, || {
+            self.properties_window(&ctx);
+            self.about_window(&ctx);
+            self.preferences_window(&ctx);
+        });
+        self.phases.windows = std::mem::take(&mut t);
+        timed(&mut t, || self.apply(actions));
+        self.phases.apply = t;
         if self.copying || self.download.is_some() || self.paste_busy() || self.clip_wait.is_some()
         {
             // Keep speed and ETA moving between progress replies.
@@ -2130,9 +2279,16 @@ impl eframe::App for App {
         let took = self.frame_start.elapsed();
         if took > SLOW_FRAME {
             tracing::debug!(
-                "slow frame: {} ms, {} replies",
+                "slow frame: {} ms, {} replies; {}",
                 took.as_millis(),
-                self.frame_replies
+                self.frame_replies,
+                self.phases.text()
+            );
+        }
+        if let Some(done) = self.dialog_done.take() {
+            tracing::debug!(
+                "folder dialog: frame ends {} ms after the result was taken",
+                done.elapsed().as_millis()
             );
         }
     }
