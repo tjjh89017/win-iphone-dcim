@@ -38,6 +38,17 @@ const EXPLORER_COPY: &str = "Copy (for Explorer paste)";
 /// Pointer travel before a drag from a selected row starts `DoDragDrop`.
 const DRAG_DISTANCE: f32 = 6.0;
 /// Largest scroll step per frame while a rubber band is past an edge.
+/// The storage key of the "Clear cache on exit" setting.
+const CLEAR_CACHE_KEY: &str = "clear_cache_on_exit";
+
+/// Delete the cache of all devices. Errors are only logged.
+fn clear_cache_folder() {
+    if let Ok(base) = cache::base_dir() {
+        let left = cache::clear_all(&base);
+        tracing::debug!("cache cleared, {left} entries left");
+    }
+}
+
 const BAND_SCROLL_MAX: f32 = 30.0;
 
 pub fn run() -> ExitCode {
@@ -57,7 +68,18 @@ pub fn run() -> ExitCode {
         options,
         Box::new(|cc| {
             add_fallback_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(&cc.egui_ctx)))
+            // A file that a viewer still holds cannot be deleted at exit,
+            // so the cache is cleared at the start as well.
+            let clear_on_exit = cc
+                .storage
+                .and_then(|s| s.get_string(CLEAR_CACHE_KEY))
+                .is_none_or(|v| v != "false");
+            if clear_on_exit {
+                clear_cache_folder();
+            }
+            let mut app = App::new(&cc.egui_ctx);
+            app.clear_cache_on_exit = clear_on_exit;
+            Ok(Box::new(app))
         }),
     );
     if ole {
@@ -182,6 +204,8 @@ struct App {
     band: Option<Band>,
     dest: Option<PathBuf>,
     force: bool,
+    /// Delete the cache of all devices when the window closes.
+    clear_cache_on_exit: bool,
     status: String,
     log: Vec<String>,
     copying: bool,
@@ -229,6 +253,7 @@ impl App {
             band: None,
             dest: None,
             force: false,
+            clear_cache_on_exit: true,
             status: String::new(),
             log: Vec::new(),
             copying: false,
@@ -913,6 +938,7 @@ impl App {
                 .unwrap_or_else(|| "(no destination)".into());
             ui.add(Label::new(dest).truncate());
             ui.checkbox(&mut self.force, "Overwrite existing (--force)");
+            ui.checkbox(&mut self.clear_cache_on_exit, "Clear cache on exit");
             if self.copying {
                 if ui.button("Cancel").clicked()
                     && let Some(d) = &self.device
@@ -1527,7 +1553,14 @@ impl eframe::App for App {
         }
     }
 
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(CLEAR_CACHE_KEY, self.clear_cache_on_exit.to_string());
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.clear_cache_on_exit {
+            clear_cache_folder();
+        }
         // A data object left on the clipboard would point to a dead process.
         if let Some(obj) = self.clipboard.take() {
             dataobject::clear_clipboard(&obj);

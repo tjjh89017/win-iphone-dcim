@@ -250,6 +250,12 @@ The window:
   run. A double-click download and an Explorer paste show their speed and ETA
   in the same way.
 
+The cache of downloaded files is deleted when the GUI closes and when it
+starts (files that a viewer still holds are left). Untick "Clear cache on
+exit" in the top bar to keep it; the setting is saved. The "Clear cache"
+button deletes the cache of the open device at any time. Copy destinations
+and manifests are never touched.
+
 Right-click menus:
 
 | Where | Items |

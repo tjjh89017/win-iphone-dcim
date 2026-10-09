@@ -94,6 +94,37 @@ pub fn clear(device_dir: &Path) -> Result<()> {
     }
 }
 
+/// Delete everything under `base`, all devices. A file that cannot be
+/// deleted (open in a viewer) is logged at debug level and left. Return the
+/// number of entries left. Never fails.
+pub fn clear_all(base: &Path) -> usize {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(e) => {
+            if e.kind() != ErrorKind::NotFound {
+                tracing::debug!("cache {}: {e}", base.display());
+            }
+            return 0;
+        }
+    };
+    let mut left = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir {
+            left += clear_all(&path);
+            if let Err(e) = std::fs::remove_dir(&path) {
+                tracing::debug!("cache {}: {e}", path.display());
+                left += 1;
+            }
+        } else if let Err(e) = std::fs::remove_file(&path) {
+            tracing::debug!("cache {}: {e}", path.display());
+            left += 1;
+        }
+    }
+    left
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +195,28 @@ mod tests {
         clear(&dir).unwrap();
         assert!(!dir.exists());
         clear(&dir).unwrap();
+    }
+
+    #[test]
+    fn base_on_windows_is_the_cache_folder_of_the_app() {
+        let base = base_from(true, Some("C:\\L".into()), None, None).unwrap();
+        assert_eq!(
+            base,
+            PathBuf::from("C:\\L").join("win-iphone-dcim").join("cache")
+        );
+    }
+
+    #[test]
+    fn clear_all_removes_every_device_and_ignores_a_missing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("cache");
+        assert_eq!(clear_all(&base), 0);
+        for key in ["a", "b"] {
+            let f = file_path(&device_dir(&base, Some(key)), "/DCIM/x/IMG.HEIC").unwrap();
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"abc").unwrap();
+        }
+        assert_eq!(clear_all(&base), 0);
+        assert!(std::fs::read_dir(&base).unwrap().next().is_none());
     }
 }
