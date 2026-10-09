@@ -1,0 +1,16 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /work
+    volumes:
+      - .:/work
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/work/target
+      - xwin-cache:/root/.cache/cargo-xwin
+
+volumes:
+  cargo-registry:
+  cargo-target:
+  xwin-cache:

@@ -1,0 +1,9 @@
+name: 'Test'
+description: 'Run the unit tests. Tests that need WPD or a real iPhone are manual and do not run here.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run tests
+      shell: pwsh
+      run: cargo test --release --locked

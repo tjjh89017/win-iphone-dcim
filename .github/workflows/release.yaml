@@ -1,0 +1,51 @@
+# Release workflow.
+#
+# Triggered by a pushed "v*" tag. It builds the Windows x64 release binary on
+# windows-latest and attaches it to a draft GitHub release. Steps live in
+# `.github/actions/*`.
+#
+# No lint/test job here: the tagged commit is expected to have already
+# passed main.yaml on main, so re-running it on the tag would only repeat
+# work already done.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Build
+        uses: ./.github/actions/build
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          files: target/release/*.exe
+          fail_on_unmatched_files: true
+          draft: true
+          generate_release_notes: true
+          prerelease: >-
+            ${{
+              contains(github.ref_name, 'RC') ||
+              contains(github.ref_name, 'rc')
+            }}

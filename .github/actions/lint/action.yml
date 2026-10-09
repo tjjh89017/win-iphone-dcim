@@ -1,0 +1,13 @@
+name: 'Lint'
+description: 'Check formatting with rustfmt and run clippy with warnings denied.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check formatting
+      shell: pwsh
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      shell: pwsh
+      run: cargo clippy --all-targets -- -D warnings

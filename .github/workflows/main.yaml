@@ -1,0 +1,82 @@
+# CI workflow.
+#
+# Checks format and clippy, runs the unit tests, then builds the Windows x64
+# release binary and uploads it as an artifact. Steps live in
+# `.github/actions/*`.
+#
+# Every job runs on windows-latest: the binary uses Windows Portable Devices
+# and targets x86_64-pc-windows-msvc. Tests that need WPD or a real iPhone are
+# manual and do not run here.
+#
+# The lint, test, and build jobs run in parallel. Build runs even when lint or
+# test fails, so the artifact always uploads.
+
+name: main
+
+# The push trigger names main only: a tag push must not re-run CI, because
+# release.yaml expects the tagged commit to have passed this chain on main.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+
+      - name: Lint
+        uses: ./.github/actions/lint
+
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Test
+        uses: ./.github/actions/test
+
+  build:
+    name: Build
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Build
+        uses: ./.github/actions/build
+
+      - name: Upload the release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: target/release/*.exe
+          retention-days: 7
+          if-no-files-found: error

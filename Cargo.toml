@@ -1,0 +1,37 @@
+[package]
+name = "win-iphone-dcim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Read-only iPhone DCIM backup for Windows. Copies photos and videos over WPD and keeps the folder structure that File Explorer shows."
+repository = "https://github.com/tjjh89017/win-iphone-dcim"
+readme = "README.md"
+keywords = ["iphone", "wpd", "backup", "windows", "dcim"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "win-iphone-dcim"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Devices_PortableDevices",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[dev-dependencies]
+tempfile = "3.27"

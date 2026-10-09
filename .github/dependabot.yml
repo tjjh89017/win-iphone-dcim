@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+
+  # "/" only covers .github/workflows. The composite actions each need their
+  # own directory, and that is where the toolchain and cache actions live.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/**"
+    schedule:
+      interval: "daily"

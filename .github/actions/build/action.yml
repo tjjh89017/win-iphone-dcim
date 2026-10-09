@@ -1,0 +1,9 @@
+name: 'Build'
+description: 'Build the Windows x64 release binary into target/release.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build the release binary
+      shell: pwsh
+      run: cargo build --release --locked
