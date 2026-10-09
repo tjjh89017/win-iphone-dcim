@@ -43,11 +43,15 @@ fn main() -> ExitCode {
 
 fn init_logging(format: LogFormat) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // A terminal keeps colors and short lines. A file or pipe (a worker
+    // under the GUI log file) gets plain text with the target, like the GUI.
+    let terminal = std::io::stderr().is_terminal();
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_ansi(terminal)
         .with_writer(progress::log_writer);
     match format {
-        LogFormat::Text => builder.with_target(false).init(),
+        LogFormat::Text => builder.with_target(!terminal).init(),
         LogFormat::Json => builder.json().init(),
     }
 }

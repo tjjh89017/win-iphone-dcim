@@ -7,6 +7,7 @@
 //! cache_max = "512MiB"         # or an integer of bytes
 //! clear_cache_on_exit = true
 //! manifest = false             # write DEST/.win-iphone-dcim/manifest.jsonl
+//! log_file = "gui.log"         # relative to the exe folder
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -34,6 +35,9 @@ pub struct Config {
     pub clear_cache_on_exit: bool,
     /// Copies write the manifest of the copy root, like `cp --manifest`.
     pub manifest: bool,
+    /// The GUI and its worker append their logs to this file. `None` means
+    /// no log file. `WIN_IPHONE_DCIM_LOG_FILE` and `--log-file` override it.
+    pub log_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -43,6 +47,7 @@ impl Default for Config {
             cache_max: DEFAULT_CACHE_MAX,
             clear_cache_on_exit: true,
             manifest: false,
+            log_file: None,
         }
     }
 }
@@ -55,6 +60,7 @@ struct RawFile {
     cache_max: Option<toml::Value>,
     clear_cache_on_exit: Option<toml::Value>,
     manifest: Option<toml::Value>,
+    log_file: Option<toml::Value>,
 }
 
 /// The folder of the running exe.
@@ -155,6 +161,13 @@ impl Config {
             Some(v) => warnings.push(format!("manifest: not true or false: {v}")),
             None => {}
         }
+        match raw.log_file {
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => {
+                self.log_file = Some(resolve_dir(Path::new(s.trim()), exe_dir));
+            }
+            Some(v) => warnings.push(format!("log_file: not a file name: {v}")),
+            None => {}
+        }
     }
 }
 
@@ -172,6 +185,8 @@ pub struct Preferences {
     pub cache_max: u64,
     /// The cache base folder in use, if any.
     pub cache_dir: Option<PathBuf>,
+    /// The `log_file` key of the config file, kept so `to_toml` keeps it.
+    pub log_file: Option<PathBuf>,
 }
 
 impl Preferences {
@@ -182,6 +197,7 @@ impl Preferences {
             force: false,
             cache_max: config.cache_max,
             cache_dir,
+            log_file: config.log_file.clone(),
         }
     }
 
@@ -196,6 +212,10 @@ impl Preferences {
         if let Some(dir) = &self.cache_dir {
             let value = toml::Value::String(dir.to_string_lossy().into_owned());
             text.push_str(&format!("cache_dir = {value}\n"));
+        }
+        if let Some(file) = &self.log_file {
+            let value = toml::Value::String(file.to_string_lossy().into_owned());
+            text.push_str(&format!("log_file = {value}\n"));
         }
         text
     }

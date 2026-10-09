@@ -217,17 +217,46 @@ Example `tree` output:
 
 Start `win-iphone-dcim-gui.exe`. No console window opens.
 
-To capture a log, open a cmd window and run:
+To capture a log, give the GUI a log file. The GUI and its worker append
+their logs to it. There are three ways. The first one found wins:
 
-```
-set RUST_LOG=win_iphone_dcim=debug
-set WIN_IPHONE_DCIM_LOG_FILE=%CD%\gui.log
-win-iphone-dcim-gui.exe
-```
+1. The `--log-file` argument. A relative path is relative to the current
+   folder. It works the same in cmd and PowerShell:
 
-Start the GUI from that same cmd window, so it gets the two variables. The
-GUI and its worker append their logs to `gui.log`. `2> gui.log` does not
-work: cmd does not pass a redirection to a GUI program.
+   ```
+   win-iphone-dcim-gui.exe --log-file gui.log
+   ```
+
+2. The `WIN_IPHONE_DCIM_LOG_FILE` environment variable. Set it in the
+   window that starts the GUI. In cmd:
+
+   ```
+   set WIN_IPHONE_DCIM_LOG_FILE=%CD%\gui.log
+   win-iphone-dcim-gui.exe
+   ```
+
+   In PowerShell (`set X=Y` does not set an environment variable there):
+
+   ```
+   $env:WIN_IPHONE_DCIM_LOG_FILE = "$PWD\gui.log"
+   .\win-iphone-dcim-gui.exe
+   ```
+
+3. The `log_file` key in `win-iphone-dcim.toml`. A relative path is
+   relative to the exe folder:
+
+   ```toml
+   log_file = "gui.log"
+   ```
+
+With a log file and no `RUST_LOG`, the level is `win_iphone_dcim=debug`.
+To pick another level, set `RUST_LOG`, in cmd with
+`set RUST_LOG=win_iphone_dcim=info`, in PowerShell with
+`$env:RUST_LOG = "win_iphone_dcim=info"`. A `RUST_LOG` value that does not
+parse gives `info` and a warning in the log. The first line of the log is
+`log started: <version>, file <path>`. If the file cannot be opened, the
+GUI writes no log. `2> gui.log` does not work: a GUI program gets no
+redirection from cmd. Without a log file, the GUI writes no log.
 
 The GUI needs `win-iphone-dcim.exe` in the same folder: it starts that file
 as its device worker, as the CLI does. If the file is missing, the GUI shows
@@ -550,11 +579,14 @@ cache_dir = "win-iphone-dcim-cache"  # a relative path starts at the exe folder
 cache_max = "2GiB"           # "512MiB", "2GiB", "5GB", or bytes: 1073741824
 clear_cache_on_exit = false  # default true; also clears at start
 manifest = true              # default false; copies write the manifest
+log_file = "gui.log"         # default none; a relative path starts at the exe folder
 ```
 
 Environment variables override the file: `WIN_IPHONE_DCIM_CACHE_DIR`,
 `WIN_IPHONE_DCIM_CACHE_MAX`, `WIN_IPHONE_DCIM_CLEAR_CACHE_ON_EXIT` and
 `WIN_IPHONE_DCIM_MANIFEST` (`true`, `false`, `1`, `0`). A bad value is ignored with a warning in the log.
+`WIN_IPHONE_DCIM_LOG_FILE` and the `--log-file` argument override `log_file`
+(see [GUI](#gui)).
 
 ## Paths
 

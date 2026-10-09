@@ -167,6 +167,7 @@ fn preferences_toml_reads_back_as_the_same_config() {
         force: true,
         cache_max: 3 << 30,
         cache_dir: Some(PathBuf::from(r#"/data/it's "my" cache\x"#)),
+        log_file: Some(PathBuf::from(r"/data/logs\gui.log")),
     };
     let text = prefs.to_toml();
     let (config, warnings) = resolve(Some(&text), &no_env);
@@ -178,4 +179,38 @@ fn preferences_toml_reads_back_as_the_same_config() {
         config.cache_dir,
         Some(PathBuf::from(r#"/data/it's "my" cache\x"#))
     );
+    assert_eq!(config.log_file, Some(PathBuf::from(r"/data/logs\gui.log")));
+}
+
+#[test]
+fn log_file_key_is_read_and_relative_paths_follow_the_exe() {
+    let (config, warnings) = resolve(None, &no_env);
+    assert_eq!(config.log_file, None);
+    assert!(warnings.is_empty());
+
+    let (config, warnings) = resolve(Some("log_file = \"logs/gui.log\""), &no_env);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(config.log_file, Some(PathBuf::from("/app/logs/gui.log")));
+
+    let (config, _) = resolve(Some("log_file = \"/var/gui.log\""), &no_env);
+    assert_eq!(config.log_file, Some(PathBuf::from("/var/gui.log")));
+}
+
+#[test]
+fn bad_log_file_values_are_ignored_with_a_warning() {
+    for text in ["log_file = 5", "log_file = \"  \"", "log_file = true"] {
+        let (config, warnings) = resolve(Some(text), &no_env);
+        assert_eq!(config.log_file, None, "{text}");
+        assert_eq!(warnings.len(), 1, "{text}: {warnings:?}");
+    }
+}
+
+#[test]
+fn preferences_to_toml_keeps_the_log_file_key() {
+    let config = Config {
+        log_file: Some(PathBuf::from("/app/gui.log")),
+        ..Config::default()
+    };
+    let prefs = Preferences::new(&config, None);
+    assert!(prefs.to_toml().ends_with("log_file = \"/app/gui.log\"\n"));
 }
