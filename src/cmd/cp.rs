@@ -1,51 +1,25 @@
 //! `cp`: copy device files and folders to a local path (SPEC.md section 5).
 //!
-//! Every copy writes the JSONL manifest of the copy root and applies the
-//! incremental rules of SPEC.md section 7. A transient failure is retried
-//! with backoff (section 8).
+//! The copy itself is `backup::engine`. This command adds the terminal
+//! progress display and the stdout lines.
 
-use std::collections::BTreeMap;
-use std::io::{ErrorKind, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
-
-use crate::backup::manifest::{
-    Manifest, Record, device_key, device_log_key, hash_file, relative_path, to_hex,
+#[cfg(test)]
+use std::{
+    io::{ErrorKind, Write},
+    time::Duration,
 };
-use crate::backup::planner::{CopyItem, PlanItem, PlanOptions, Planner};
-use crate::backup::transfer::{leftover_parts, set_file_times, transfer};
+
+use crate::backup::engine::{self, CopyOptions, ProgressSink};
+pub use crate::backup::engine::{DEFAULT_RETRIES, OnExists, backoff};
 use crate::device_fs::DeviceFs;
 use crate::devpath::DevicePath;
-use crate::error::{Error, Result, stdout_err};
-use crate::model::{
-    ExistingState, FailureKind, Node, SyncDecision, TransferReport, human_size, human_speed,
-};
-use crate::paths::normalize_local;
+#[cfg(test)]
+use crate::error::Error;
+use crate::error::Result;
+#[cfg(test)]
+use crate::model::Node;
 use crate::progress::{Progress, ProgressMode};
-
-/// What to do when a file is already at the target path and it is not verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OnExists {
-    /// Keep the file, log a warning, count it as skipped.
-    #[default]
-    SkipWarn,
-    /// `-n`: keep the file and count it as skipped, with no warning.
-    SkipQuiet,
-    /// `-f`: replace the file through a `.part` file and an atomic rename.
-    Overwrite,
-}
-
-/// Default number of additional attempts after a transient failure.
-pub const DEFAULT_RETRIES: u32 = 3;
-
-/// Wait before retry `attempt` (1-based): 1 s, 3 s, 10 s, then 10 s.
-pub fn backoff(attempt: u32) -> Duration {
-    Duration::from_secs(match attempt {
-        0 | 1 => 1,
-        2 => 3,
-        _ => 10,
-    })
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CpOptions {
@@ -61,57 +35,41 @@ pub struct CpOptions {
     /// Additional attempts after a transient failure.
     pub retries: u32,
     /// Waits between attempts. Tests replace it.
-    pub sleep: fn(Duration),
+    pub sleep: fn(std::time::Duration),
     /// `--diagnostic`: log the raw device ID.
     pub diagnostic: bool,
 }
 
 impl Default for CpOptions {
     fn default() -> Self {
+        let d = CopyOptions::default();
         Self {
-            recursive: false,
-            preserve: false,
-            dry_run: false,
-            on_exists: OnExists::SkipWarn,
+            recursive: d.recursive,
+            preserve: d.preserve,
+            dry_run: d.dry_run,
+            on_exists: d.on_exists,
             progress: ProgressMode::Off,
-            local_hash: false,
-            retries: DEFAULT_RETRIES,
-            sleep: std::thread::sleep,
-            diagnostic: false,
+            local_hash: d.local_hash,
+            retries: d.retries,
+            sleep: d.sleep,
+            diagnostic: d.diagnostic,
         }
     }
 }
 
-struct Failure {
-    source: String,
-    message: String,
-}
-
-#[derive(Default)]
-struct Summary {
-    copied: usize,
-    skipped: usize,
-    exists: usize,
-    bytes: u64,
-    failures: BTreeMap<FailureKind, Vec<Failure>>,
-}
-
-impl Summary {
-    fn failed(&self) -> usize {
-        self.failures.values().map(Vec::len).sum()
+impl CpOptions {
+    fn engine(&self) -> CopyOptions {
+        CopyOptions {
+            recursive: self.recursive,
+            preserve: self.preserve,
+            dry_run: self.dry_run,
+            on_exists: self.on_exists,
+            local_hash: self.local_hash,
+            retries: self.retries,
+            sleep: self.sleep,
+            diagnostic: self.diagnostic,
+        }
     }
-}
-
-struct Run<'a> {
-    fs: &'a dyn DeviceFs,
-    opts: CpOptions,
-    out: &'a mut dyn Write,
-    progress: Progress,
-    summary: Summary,
-    /// Device key for the manifest (hash of the raw device ID).
-    device: Option<String>,
-    /// The manifest of the copy root. Loaded when the root is known.
-    manifest: Option<Manifest>,
 }
 
 /// Copy `sources` to `dest`. Return the number of failed items.
@@ -123,438 +81,76 @@ pub fn run(
     sources: &[DevicePath],
     dest: &Path,
     opts: CpOptions,
-    out: &mut dyn Write,
+    out: &mut dyn std::io::Write,
 ) -> Result<usize> {
-    // Absolute and, on Windows, verbatim (`\\?\D:\...`, `\\?\UNC\...`):
-    // long paths and UNC shares work without the LongPathsEnabled setting.
-    let dest = normalize_local(dest)?;
-    let device = fs.device_id().map(|raw| {
-        let key = device_key(&raw);
-        if opts.diagnostic {
-            tracing::info!("device {}  raw id {raw}", device_log_key(&key));
-        } else {
-            tracing::info!("device {}", device_log_key(&key));
-        }
-        key
-    });
-    let mut planner = Planner::new(
-        fs,
-        sources,
-        &dest,
-        PlanOptions {
-            recursive: opts.recursive,
-        },
-    )?;
-    let start = Instant::now();
-    let mut run = Run {
-        fs,
-        opts,
-        out,
-        progress: Progress::new(if opts.dry_run {
-            ProgressMode::Off
-        } else {
-            opts.progress
-        }),
-        summary: Summary::default(),
-        device,
-        manifest: None,
+    let mode = if opts.dry_run {
+        ProgressMode::Off
+    } else {
+        opts.progress
     };
-    if dest.is_dir() {
-        run.open_manifest(&dest)?;
-    }
-    let mut fatal = None;
-    while let Some(item) = planner.next() {
-        if run.manifest.is_none() {
-            // DEST did not exist: it is the new folder, or the new file name
-            // of a single file SRC.
-            match &item {
-                PlanItem::Dir { .. } => run.open_manifest(&dest)?,
-                PlanItem::Copy(_) => run.open_manifest(dest.parent().unwrap_or(&dest))?,
-                PlanItem::Error { .. } => {}
-            }
+    let mut sink = TerminalSink {
+        mode,
+        progress: None,
+    };
+    engine::run(fs, sources, dest, opts.engine(), &mut sink, out).map(|s| s.failed)
+}
+
+/// `Progress` behind the engine's sink. The bars appear when the run begins.
+struct TerminalSink {
+    mode: ProgressMode,
+    progress: Option<Progress>,
+}
+
+impl TerminalSink {
+    fn with(&mut self, f: impl FnOnce(&mut Progress)) {
+        if let Some(p) = self.progress.as_mut() {
+            f(p);
         }
-        let result = match item {
-            PlanItem::Dir { source, target } => match run.enter_dir(&target) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    planner.skip_dir();
-                    run.fail(&source, e)
-                }
-            },
-            PlanItem::Copy(item) => run.copy(item),
-            PlanItem::Error { source, error } => run.fail(&source, error),
-        };
-        if let Err(e) = result {
-            fatal = Some(e);
-            break;
-        }
-    }
-    run.progress.scan_done();
-    run.progress.finish();
-    run.print_summary(start.elapsed())?;
-    match fatal {
-        Some(e) => Err(e),
-        None => Ok(run.summary.failed()),
     }
 }
 
-impl Run<'_> {
-    fn println(&mut self, line: String) -> Result<()> {
-        let out = &mut *self.out;
-        self.progress
-            .suspend(|| writeln!(out, "{line}"))
-            .map_err(stdout_err)
+impl ProgressSink for TerminalSink {
+    fn begin(&mut self) {
+        self.progress = Some(Progress::new(self.mode));
     }
 
-    /// Load the manifest of the copy root and compare it with the local files.
-    fn open_manifest(&mut self, root: &Path) -> Result<()> {
-        let mut manifest = Manifest::load(root)?;
-        let counts = manifest.reconcile();
-        if !manifest.is_empty() {
-            tracing::info!(
-                "manifest {}: {} record(s), {} stale",
-                Manifest::path_for(root).display(),
-                manifest.len(),
-                counts.stale
-            );
-        }
-        self.manifest = Some(manifest);
-        Ok(())
+    fn found(&mut self, size: Option<u64>) {
+        self.with(|p| p.found(size));
     }
 
-    /// Record a per-item failure. Return the error if it is fatal.
-    fn fail(&mut self, source: &str, error: Error) -> Result<()> {
-        if error.is_fatal() {
-            return Err(error);
-        }
-        if self.opts.dry_run {
-            self.println(format!("[error] {source}  {error}"))?;
-        } else {
-            tracing::error!("{source}: {error}");
-        }
-        self.summary
-            .failures
-            .entry(error.kind())
-            .or_default()
-            .push(Failure {
-                source: source.to_owned(),
-                message: error.to_string(),
-            });
-        Ok(())
+    fn settled(&mut self, size: Option<u64>) {
+        self.with(|p| p.settled(size));
     }
 
-    /// Create the local folder, or reuse it if it exists.
-    fn enter_dir(&mut self, target: &Path) -> Result<()> {
-        match std::fs::metadata(target) {
-            Ok(m) if m.is_dir() => {
-                for part in leftover_parts(target) {
-                    tracing::warn!(
-                        "leftover partial file {} is not a complete file; it is left in place",
-                        part.display()
-                    );
-                }
-                Ok(())
-            }
-            Ok(_) => Err(Error::NotAFolderLocal(target.to_path_buf())),
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                if self.opts.dry_run {
-                    self.println(format!("[plan] mkdir {}", target.display()))
-                } else {
-                    std::fs::create_dir(target).map_err(|source| Error::Io {
-                        context: format!("create folder {}", target.display()),
-                        source,
-                    })
-                }
-            }
-            Err(source) => Err(Error::Io {
-                context: format!("inspect {}", target.display()),
-                source,
-            }),
-        }
+    fn file_start(&mut self, source: &str, size: Option<u64>) {
+        self.with(|p| p.file_start(source, size));
     }
 
-    /// The manifest path of `target`, if it is below the copy root.
-    fn relative(&self, target: &Path) -> Option<String> {
-        relative_path(self.manifest.as_ref()?.root(), target)
+    fn bytes(&mut self, n: u64) {
+        self.with(|p| p.bytes(n));
     }
 
-    /// Apply the incremental rules of SPEC.md section 7 to one file.
-    fn decide(&self, source: &str, node: &Node, target: &Path) -> Result<SyncDecision> {
-        let meta = match std::fs::symlink_metadata(target) {
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(SyncDecision::Copy),
-            Err(source) => {
-                return Err(Error::Io {
-                    context: format!("inspect {}", target.display()),
-                    source,
-                });
-            }
-            Ok(m) if m.is_dir() => return Err(Error::TargetIsFolder(target.to_path_buf())),
-            Ok(m) => m,
-        };
-        let local = meta.len();
-        let entry = self
-            .relative(target)
-            .and_then(|rel| self.manifest.as_ref()?.get(&rel));
-        let state = match (entry, node.size) {
-            (Some(e), _) if e.stale.is_some() => ExistingState::Conflict(format!(
-                "manifest record is stale ({})",
-                e.stale.as_deref().unwrap_or_default()
-            )),
-            (Some(e), _) if differ(&e.record.device, &self.device) => {
-                ExistingState::Conflict("manifest record is from another device".into())
-            }
-            (Some(e), _) if e.record.source.as_deref().is_some_and(|s| s != source) => {
-                ExistingState::Conflict(format!(
-                    "manifest record is for another source ({})",
-                    e.record.source.as_deref().unwrap_or_default()
-                ))
-            }
-            (Some(_), None) => ExistingState::SizeUnavailable,
-            (_, Some(size)) if size != local => {
-                ExistingState::Conflict(format!("local size {local}, device size {size}"))
-            }
-            (Some(e), Some(_)) => match e.record.blake3().filter(|_| self.opts.local_hash) {
-                None => return Ok(SyncDecision::SkipVerified),
-                Some(stored) => {
-                    let actual = hash_file(target).map_err(|source| Error::Io {
-                        context: format!("hash {}", target.display()),
-                        source,
-                    })?;
-                    if to_hex(&actual).eq_ignore_ascii_case(stored) {
-                        return Ok(SyncDecision::SkipVerified);
-                    }
-                    ExistingState::Conflict("local hash differs from the manifest".into())
-                }
-            },
-            (None, Some(_)) => ExistingState::UnverifiedExisting,
-            (None, None) => {
-                ExistingState::Conflict("no manifest record and the device gives no size".into())
-            }
-        };
-        Ok(match self.opts.on_exists {
-            OnExists::SkipWarn => SyncDecision::SkipExists { state, warn: true },
-            OnExists::SkipQuiet => SyncDecision::SkipExists { state, warn: false },
-            OnExists::Overwrite => SyncDecision::Overwrite { state },
-        })
+    fn restart_file(&mut self) {
+        self.with(Progress::restart_file);
     }
 
-    fn skip_exists(&mut self, target: &Path, state: &ExistingState, warn: bool) -> Result<()> {
-        self.summary.skipped += 1;
-        self.summary.exists += 1;
-        let line = format!(
-            "[skip] {}  {state} (use --force to replace)",
-            target.display()
-        );
-        if !warn {
-            Ok(())
-        } else if self.opts.dry_run {
-            self.println(line)
-        } else {
-            tracing::warn!("{line}");
-            Ok(())
-        }
+    fn file_end(&mut self, ok: bool) {
+        self.with(|p| p.file_end(ok));
     }
 
-    fn copy(&mut self, item: CopyItem) -> Result<()> {
-        let CopyItem {
-            source,
-            node,
-            target,
-        } = item;
-        self.progress.found(node.size);
-        let decision = match self.decide(&source, &node, &target) {
-            Ok(d) => d,
-            Err(e) => {
-                self.progress.settled(node.size);
-                return self.fail(&source, e);
-            }
-        };
-        let overwrite = match decision {
-            SyncDecision::SkipVerified => {
-                self.summary.skipped += 1;
-                self.progress.settled(node.size);
-                return self.println(format!("[skip] {source}  verified"));
-            }
-            SyncDecision::SkipExists { state, warn } => {
-                self.progress.settled(node.size);
-                return self.skip_exists(&target, &state, warn);
-            }
-            SyncDecision::Overwrite { state } => Some(state),
-            SyncDecision::Copy => None,
-        };
-        let size = node
-            .size
-            .map(human_size)
-            .unwrap_or_else(|| "size unknown".into());
-        if self.opts.dry_run {
-            let note = match &overwrite {
-                Some(state) => format!(", overwrite: {state}"),
-                None => String::new(),
-            };
-            self.summary.copied += 1;
-            return self.println(format!(
-                "[plan] {source} -> {}  ({size}{note})",
-                target.display()
-            ));
-        }
-        let replace = overwrite.is_some();
-        let report = match self.transfer_with_retries(&source, &node, &target, replace)? {
-            Ok(r) => r,
-            // A file appeared at the target after the check.
-            Err(Error::OutputExists(_)) if self.opts.on_exists != OnExists::Overwrite => {
-                self.summary.skipped += 1;
-                self.summary.exists += 1;
-                if self.opts.on_exists == OnExists::SkipWarn {
-                    tracing::warn!(
-                        "[skip] {}  exists (use --force to replace)",
-                        target.display()
-                    );
-                }
-                return Ok(());
-            }
-            Err(e) => return self.fail(&source, e),
-        };
-        if let Some(state) = &overwrite {
-            tracing::warn!("[overwrite] {}  {state}", target.display());
-        }
-        if self.opts.preserve {
-            preserve_times(&target, &node);
-        }
-        if let Err(e) = self.record(&source, &node, &target, &report) {
-            return self.fail(&source, e);
-        }
-        self.summary.copied += 1;
-        self.summary.bytes += report.bytes;
-        self.println(format!(
-            "[copy] {source} -> {}  {} / {size}  {}",
-            target.display(),
-            human_size(report.bytes),
-            report.verification
-        ))
+    fn scan_done(&mut self) {
+        self.with(Progress::scan_done);
     }
 
-    /// Transfer one file. Retry a transient failure up to `retries` times
-    /// with backoff. A failed attempt removes its `.part` file before the
-    /// next one. The outer `Err` is a failed write to stdout.
-    fn transfer_with_retries(
-        &mut self,
-        source: &str,
-        node: &Node,
-        target: &Path,
-        replace: bool,
-    ) -> Result<Result<TransferReport>> {
-        self.progress.file_start(source, node.size);
-        let mut attempt = 0;
-        let result = loop {
-            let progress = &mut self.progress;
-            let result = transfer(
-                self.fs,
-                node,
-                target,
-                replace,
-                self.opts.local_hash,
-                &mut |n| progress.bytes(n),
-            );
-            match result {
-                Err(e) if e.is_transient() && attempt < self.opts.retries => {
-                    attempt += 1;
-                    self.println(format!(
-                        "[retry {attempt}/{}] {source}  {e}",
-                        self.opts.retries
-                    ))?;
-                    (self.opts.sleep)(backoff(attempt));
-                    self.progress.restart_file();
-                }
-                other => break other,
-            }
-        };
-        self.progress.file_end(result.is_ok());
-        Ok(result)
+    fn finish(&mut self) {
+        self.with(Progress::finish);
     }
 
-    /// Append the manifest record of a committed file.
-    fn record(
-        &mut self,
-        source: &str,
-        node: &Node,
-        target: &Path,
-        report: &TransferReport,
-    ) -> Result<()> {
-        let Some(rel) = self.relative(target) else {
-            tracing::warn!(
-                "{}: not below the copy root; no manifest record",
-                target.display()
-            );
-            return Ok(());
-        };
-        let record = Record::committed(
-            self.device.clone(),
-            rel,
-            source.to_owned(),
-            report.bytes,
-            node.modified,
-            node.created,
-            report.verification,
-            report.hash,
-        );
-        match self.manifest.as_mut() {
-            Some(m) => m.append(record),
-            None => Ok(()),
+    fn suspend(&mut self, f: &mut dyn FnMut()) {
+        match &self.progress {
+            Some(p) => p.suspend(f),
+            None => f(),
         }
-    }
-
-    fn print_summary(&mut self, elapsed: Duration) -> Result<()> {
-        let s = &self.summary;
-        let verb = if self.opts.dry_run {
-            "planned"
-        } else {
-            "copied"
-        };
-        let mut line = format!(
-            "[done] {verb}={} skipped={} exists={} failed={}",
-            s.copied,
-            s.skipped,
-            s.exists,
-            s.failed()
-        );
-        if !self.opts.dry_run {
-            line.push_str(&format!(
-                "  total={} elapsed={:.1}s avg={}",
-                human_size(s.bytes),
-                elapsed.as_secs_f64(),
-                human_speed(s.bytes, elapsed)
-            ));
-        }
-        let mut lines = vec![line];
-        for (kind, list) in &s.failures {
-            lines.push(format!("[failed] {kind}: {}", list.len()));
-            for f in list {
-                lines.push(format!("  {}: {}", f.source, f.message));
-            }
-        }
-        for l in lines {
-            self.println(l)?;
-        }
-        Ok(())
-    }
-}
-
-/// True if both device keys are known and they differ.
-fn differ(a: &Option<String>, b: &Option<String>) -> bool {
-    matches!((a, b), (Some(a), Some(b)) if a != b)
-}
-
-/// `-p`: set the local times from the device. Timestamps are metadata only.
-/// A failure is logged and does not fail the copy.
-fn preserve_times(target: &Path, node: &Node) {
-    if node.modified.is_none() {
-        tracing::info!(
-            "{}: the device gives no modified date; the copy time stays",
-            target.display()
-        );
-    }
-    if let Err(e) = set_file_times(target, node.modified, node.created) {
-        tracing::warn!("{}: cannot set the file times: {e}", target.display());
     }
 }
 
