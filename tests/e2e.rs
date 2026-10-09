@@ -84,7 +84,7 @@ fn copy_twice_then_verify() {
     let tmp = tempfile::tempdir().unwrap();
     let dest = tmp.path().to_str().unwrap();
 
-    let out = ok(&["cp", "-r", DCIM, dest]);
+    let out = ok(&["cp", "-r", "--manifest", DCIM, dest]);
     assert_eq!(out.matches("[copy] ").count(), 3, "{out}");
     assert!(out.contains("copied=3 skipped=0"), "{out}");
     let root = tmp.path().join("DCIM");
@@ -92,7 +92,7 @@ fn copy_twice_then_verify() {
     assert_eq!(read(&root.join("202601_a/IMG_0002.MOV")), vec![0u8; 2048]);
     assert_eq!(read(&root.join("202601_b/IMG_0001.HEIC")), b"heic-b");
 
-    let out = ok(&["cp", "-r", DCIM, dest]);
+    let out = ok(&["cp", "-r", "--manifest", DCIM, dest]);
     assert!(!out.contains("[copy] "), "{out}");
     assert_eq!(out.matches("  verified").count(), 3, "{out}");
     assert!(
@@ -102,6 +102,31 @@ fn copy_twice_then_verify() {
 
     let out = ok(&["verify", dest]);
     assert_eq!(out.matches("[ok] ").count(), 3, "{out}");
+}
+
+#[test]
+fn default_copy_writes_no_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().to_str().unwrap();
+
+    let out = ok(&["cp", "-r", DCIM, dest]);
+    assert!(out.contains("copied=3 skipped=0"), "{out}");
+    assert!(!tmp.path().join(".win-iphone-dcim").exists());
+
+    let out = ok(&["cp", "-r", DCIM, dest]);
+    assert_eq!(out.matches("  exists, same size").count(), 3, "{out}");
+    assert!(
+        out.contains("copied=0 skipped=3 exists=0 failed=0"),
+        "{out}"
+    );
+    assert!(!tmp.path().join(".win-iphone-dcim").exists());
+
+    let (_, _, err) = output(&mut command(&["verify", dest]));
+    assert!(
+        err.contains("run cp with --manifest to record copies"),
+        "{err}"
+    );
+    assert!(!tmp.path().join(".win-iphone-dcim").exists());
 }
 
 /// SPEC.md section 11, "WPD Read() hangs": the parent kills the worker

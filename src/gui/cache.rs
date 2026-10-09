@@ -1,8 +1,8 @@
 //! Local cache for files that the GUI opens (SPEC.md section 10, Phase 4).
 //!
 //! Layout: `<base>\<device key>\<device path>`, with the original folder
-//! and file names. `<base>` is `cache_dir` from the config, else a `cache`
-//! folder next to the GUI exe. If that folder is not writable, `<base>` is
+//! and file names. `<base>` is `cache_dir` from the config, else a
+//! `win-iphone-dcim-cache` folder next to the GUI exe. If that folder is not writable, `<base>` is
 //! `%LOCALAPPDATA%\win-iphone-dcim\cache` on Windows, and elsewhere
 //! `$XDG_CACHE_HOME/win-iphone-dcim`, else `$HOME/.cache/win-iphone-dcim`.
 //!
@@ -25,12 +25,15 @@ const UNKNOWN_DEVICE: &str = "unknown-device";
 /// File created and deleted to test that a cache folder is writable.
 const PROBE_FILE: &str = ".write-test";
 
-/// The cache base folder: `configured`, else `cache` next to the exe. If
+/// The default cache folder name next to the exe.
+pub const DEFAULT_DIR: &str = "win-iphone-dcim-cache";
+
+/// The cache base folder: `configured`, else `DEFAULT_DIR` next to the exe. If
 /// that folder cannot be created or written, fall back to `base_dir`.
 pub fn choose_base(configured: Option<&Path>, exe_dir: Option<&Path>) -> Option<PathBuf> {
     let wanted = configured
         .map(Path::to_path_buf)
-        .or_else(|| exe_dir.map(|d| d.join("cache")));
+        .or_else(|| exe_dir.map(|d| d.join(DEFAULT_DIR)));
     choose_base_with(wanted, || base_dir().ok())
 }
 

@@ -1,15 +1,16 @@
 //! Copy engine: copies device files and folders to a local path with the
 //! `cp` rules of SPEC.md section 5.
 //!
-//! Every copy writes the JSONL manifest of the copy root and applies the
-//! incremental rules of SPEC.md section 7. A transient failure is retried
+//! With `manifest`, a copy writes the JSONL manifest of the copy root and
+//! applies the incremental rules of SPEC.md section 7. Without it, a local
+//! file of the same size is kept. A transient failure is retried
 //! with backoff (section 8). The engine reports progress to a
 //! `ProgressSink`: the CLI draws terminal bars, the GUI forwards events to
 //! its window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::backup::manifest::{
@@ -133,6 +134,8 @@ pub struct CopyOptions {
     pub sleep: fn(Duration),
     /// `--diagnostic`: log the raw device ID.
     pub diagnostic: bool,
+    /// `--manifest`: read and write `DEST/.win-iphone-dcim/manifest.jsonl`.
+    pub manifest: bool,
 }
 
 impl Default for CopyOptions {
@@ -146,6 +149,7 @@ impl Default for CopyOptions {
             retries: DEFAULT_RETRIES,
             sleep: std::thread::sleep,
             diagnostic: false,
+            manifest: false,
         }
     }
 }
@@ -191,6 +195,8 @@ struct Run<'a> {
     device: Option<String>,
     /// The manifest of the copy root. Loaded when the root is known.
     manifest: Option<Manifest>,
+    /// Without a manifest: the targets this run wrote, with their sources.
+    written: HashMap<PathBuf, String>,
 }
 
 /// Copy `sources` to `dest`. Result lines go to `out` and to
@@ -236,8 +242,9 @@ pub fn run(
         summary: Summary::default(),
         device,
         manifest: None,
+        written: HashMap::new(),
     };
-    if dest.is_dir() {
+    if opts.manifest && dest.is_dir() {
         run.open_manifest(&dest)?;
     }
     let mut fatal = None;
@@ -251,7 +258,7 @@ pub fn run(
         let Some(item) = planner.next() else {
             break;
         };
-        if run.manifest.is_none() {
+        if opts.manifest && run.manifest.is_none() {
             // DEST did not exist: it is the new folder, or the new file name
             // of a single file SRC.
             match &item {
@@ -391,6 +398,22 @@ impl Run<'_> {
             Ok(m) => m,
         };
         let local = meta.len();
+        if !self.opts.manifest {
+            let state = match (self.written.get(target), node.size) {
+                (Some(other), _) => {
+                    ExistingState::Conflict(format!("copied in this run from {other}"))
+                }
+                (None, Some(size)) if size == local => match self.opts.on_exists {
+                    OnExists::Overwrite => ExistingState::UnverifiedExisting,
+                    _ => return Ok(SyncDecision::SkipSameSize),
+                },
+                (None, Some(size)) => {
+                    ExistingState::Conflict(format!("local size {local}, device size {size}"))
+                }
+                (None, None) => ExistingState::Conflict("the device gives no size".into()),
+            };
+            return Ok(self.on_exists(state));
+        }
         let entry = self
             .relative(target)
             .and_then(|rel| self.manifest.as_ref()?.get(&rel));
@@ -430,11 +453,16 @@ impl Run<'_> {
                 ExistingState::Conflict("no manifest record and the device gives no size".into())
             }
         };
-        Ok(match self.opts.on_exists {
+        Ok(self.on_exists(state))
+    }
+
+    /// The decision for an existing target file that is not kept as is.
+    fn on_exists(&self, state: ExistingState) -> SyncDecision {
+        match self.opts.on_exists {
             OnExists::SkipWarn => SyncDecision::SkipExists { state, warn: true },
             OnExists::SkipQuiet => SyncDecision::SkipExists { state, warn: false },
             OnExists::Overwrite => SyncDecision::Overwrite { state },
-        })
+        }
     }
 
     fn skip_exists(&mut self, target: &Path, state: &ExistingState, warn: bool) -> Result<()> {
@@ -474,6 +502,14 @@ impl Run<'_> {
                 self.summary.skipped += 1;
                 self.progress.settled(node.size);
                 return self.println(Note::Skip, format!("[skip] {source}  verified"));
+            }
+            SyncDecision::SkipSameSize => {
+                self.summary.skipped += 1;
+                self.progress.settled(node.size);
+                return self.println(
+                    Note::Skip,
+                    format!("[skip] {}  exists, same size", target.display()),
+                );
             }
             SyncDecision::SkipExists { state, warn } => {
                 self.progress.settled(node.size);
@@ -579,6 +615,10 @@ impl Run<'_> {
         target: &Path,
         report: &TransferReport,
     ) -> Result<()> {
+        if !self.opts.manifest {
+            self.written.insert(target.to_path_buf(), source.to_owned());
+            return Ok(());
+        }
         let Some(rel) = self.relative(target) else {
             tracing::warn!(
                 "{}: not below the copy root; no manifest record",

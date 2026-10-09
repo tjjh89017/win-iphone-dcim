@@ -19,7 +19,7 @@ use windows::Win32::System::Com::IDataObject;
 
 use super::cache;
 use super::chunks::Pending;
-use super::config::{self, Config};
+use super::config::{self, Config, Preferences};
 use super::copyview::{CopyTracker, EndState, PasteFile, PasteTracker};
 use super::dataobject::{self, DataObject, PasteShared};
 use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
@@ -69,11 +69,11 @@ pub fn run() -> ExitCode {
             let exe_dir = config::exe_dir();
             let config = Config::load(exe_dir.as_deref());
             let cache_base = cache::choose_base(config.cache_dir.as_deref(), exe_dir.as_deref());
-            let mut app = App::new(&cc.egui_ctx, cache_base, config.cache_max);
-            app.clear_cache_on_exit = config.clear_cache_on_exit;
+            let prefs = Preferences::new(&config, cache_base.clone());
+            let app = App::new(&cc.egui_ctx, cache_base, prefs);
             // A file that a viewer still holds cannot be deleted at exit,
             // so the cache is cleared at the start as well.
-            if app.clear_cache_on_exit {
+            if app.prefs.clear_cache_on_exit {
                 app.clear_cache_folder();
             }
             Ok(Box::new(app))
@@ -168,6 +168,7 @@ enum Action {
     /// Delete the cache of the open device.
     ClearCache,
     ShowAbout,
+    ShowPreferences,
     Exit,
 }
 
@@ -197,8 +198,6 @@ struct App {
     cache_dir: Option<PathBuf>,
     /// The cache base folder of all devices. `None` if no folder is usable.
     cache_base: Option<PathBuf>,
-    /// The soft size limit of the cache, in bytes.
-    cache_max: u64,
     loading: HashSet<String>,
     /// Folders whose subfolders open when they are listed ("Expand all").
     expanding: HashSet<String>,
@@ -216,12 +215,13 @@ struct App {
     properties: Option<String>,
     /// The About window is open.
     about: bool,
+    /// The Preferences window is open.
+    preferences: bool,
     /// The rubber-band drag in the file list.
     band: Option<Band>,
     dest: Option<PathBuf>,
-    force: bool,
-    /// Delete the cache of all devices when the window closes.
-    clear_cache_on_exit: bool,
+    /// The session settings: manifest, force, cache limit, clear on exit.
+    prefs: Preferences,
     status: String,
     /// The scan and copy status, on its own line below the top row.
     copy_status: String,
@@ -249,8 +249,12 @@ struct App {
     release_pointer: bool,
 }
 
+/// Bytes in a MiB, for the cache size limit.
+const MIB: u64 = 1 << 20;
+
 impl App {
-    fn new(ctx: &egui::Context, cache_base: Option<PathBuf>, cache_max: u64) -> Self {
+    fn new(ctx: &egui::Context, cache_base: Option<PathBuf>, prefs: Preferences) -> Self {
+        let cache_max = prefs.cache_max;
         let mut app = Self {
             device: None,
             ctx: ctx.clone(),
@@ -259,7 +263,6 @@ impl App {
             tree: None,
             cache_dir: None,
             cache_base: cache_base.clone(),
-            cache_max,
             loading: HashSet::new(),
             expanding: HashSet::new(),
             folder: None,
@@ -269,10 +272,10 @@ impl App {
             rows: ListSelection::default(),
             properties: None,
             about: false,
+            preferences: false,
             band: None,
             dest: None,
-            force: false,
-            clear_cache_on_exit: true,
+            prefs,
             status: String::new(),
             copy_status: String::new(),
             log: Vec::new(),
@@ -331,7 +334,7 @@ impl App {
             .map_or_else(|| "(none)".into(), |p| p.display().to_string());
         format!(
             "Cache folder: {dir}\nSize limit: {} (soft)",
-            human_size(self.cache_max)
+            human_size(self.prefs.cache_max)
         )
     }
 
@@ -803,7 +806,8 @@ impl App {
         d.send(Request::Copy {
             what,
             dest: dest.clone(),
-            force: self.force,
+            force: self.prefs.force,
+            manifest: self.prefs.manifest,
             totals,
         });
         self.copying = true;
@@ -972,6 +976,7 @@ impl App {
                 }
                 Action::ClearCache => self.send(Request::ClearCache),
                 Action::ShowAbout => self.about = true,
+                Action::ShowPreferences => self.preferences = true,
                 Action::Exit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
@@ -1088,7 +1093,7 @@ impl App {
                 {
                     actions.push(Action::CancelCopy);
                 }
-                ui.checkbox(&mut self.force, "Overwrite existing (--force)");
+                ui.checkbox(&mut self.prefs.force, "Overwrite existing (--force)");
                 ui.separator();
                 let one = self.menu_targets();
                 if ui
@@ -1124,7 +1129,7 @@ impl App {
                 {
                     actions.push(Action::ClearCache);
                 }
-                ui.checkbox(&mut self.clear_cache_on_exit, "Clear cache on exit");
+                ui.checkbox(&mut self.prefs.clear_cache_on_exit, "Clear cache on exit");
                 ui.separator();
                 if ui
                     .add(Button::new("Exit").shortcut_text("Alt+F4"))
@@ -1178,6 +1183,10 @@ impl App {
                     .clicked()
                 {
                     actions.push(Action::ExplorerCopy(self.menu_targets()));
+                }
+                ui.separator();
+                if ui.button("Preferences...").clicked() {
+                    actions.push(Action::ShowPreferences);
                 }
             });
             ui.menu_button("View", |ui| {
@@ -1261,6 +1270,62 @@ impl App {
         self.about = open;
     }
 
+    /// Session settings. The app never writes them to a file; the window
+    /// shows the config text that keeps them.
+    fn preferences_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.preferences;
+        let mut close = false;
+        let old_max = self.prefs.cache_max;
+        egui::Window::new("Preferences")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let prefs = &mut self.prefs;
+                ui.checkbox(
+                    &mut prefs.manifest,
+                    "Write manifest (.win-iphone-dcim/manifest.jsonl) for incremental copy and verify",
+                );
+                ui.checkbox(&mut prefs.clear_cache_on_exit, "Clear cache on exit");
+                ui.checkbox(&mut prefs.force, "Overwrite existing files (--force)");
+                ui.horizontal(|ui| {
+                    ui.label("Cache size limit:");
+                    let mut mib = prefs.cache_max / MIB;
+                    if ui
+                        .add(egui::DragValue::new(&mut mib).range(1..=u64::MAX / MIB).suffix(" MiB"))
+                        .on_hover_text("Soft limit. It applies to the next download.")
+                        .changed()
+                    {
+                        prefs.cache_max = mib * MIB;
+                    }
+                });
+                let dir = prefs
+                    .cache_dir
+                    .as_ref()
+                    .map_or_else(|| "(none)".into(), |p| p.display().to_string());
+                ui.label(format!("Cache folder: {dir}"));
+                ui.separator();
+                ui.label(format!(
+                    "To keep these settings, put them in {} next to the exe:",
+                    config::CONFIG_FILE
+                ));
+                let text = prefs.to_toml();
+                ui.code(text.trim_end());
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(text.clone());
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if self.prefs.cache_max != old_max {
+            self.send(Request::SetCacheMax(self.prefs.cache_max));
+        }
+        self.preferences = open && !close;
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui, state: MenuState, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Device:");
@@ -1302,8 +1367,8 @@ impl App {
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|| "(no destination)".into());
             ui.add(Label::new(dest).truncate());
-            ui.checkbox(&mut self.force, "Overwrite existing (--force)");
-            ui.checkbox(&mut self.clear_cache_on_exit, "Clear cache on exit");
+            ui.checkbox(&mut self.prefs.force, "Overwrite existing (--force)");
+            ui.checkbox(&mut self.prefs.clear_cache_on_exit, "Clear cache on exit");
             if self.copying {
                 if ui.button("Cancel").clicked() {
                     actions.push(Action::CancelCopy);
@@ -1948,7 +2013,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.clear_cache_on_exit {
+        if self.prefs.clear_cache_on_exit {
             self.clear_cache_folder();
         }
         // A data object left on the clipboard would point to a dead process.
@@ -1974,6 +2039,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.properties_window(&ctx);
         self.about_window(&ctx);
+        self.preferences_window(&ctx);
         self.apply(actions);
         if self.copying || self.download.is_some() || self.paste_busy() || self.clip_wait.is_some()
         {

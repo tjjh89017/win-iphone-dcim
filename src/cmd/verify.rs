@@ -37,7 +37,12 @@ pub fn run(dest: &Path, opts: VerifyOptions, out: &mut dyn Write) -> Result<usiz
         return Err(Error::NotAFolderLocal(root));
     }
     let manifest = Manifest::load(&root)?;
-    if manifest.is_empty() {
+    if !Manifest::path_for(&root).exists() {
+        tracing::warn!(
+            "no manifest in {}; run cp with --manifest to record copies",
+            root.display()
+        );
+    } else if manifest.is_empty() {
         tracing::warn!(
             "no manifest records in {}",
             Manifest::path_for(&root).display()

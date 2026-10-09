@@ -203,7 +203,7 @@ win-iphone-dcim.exe verify [--hash] DEST
   - `-L <depth>` limits the depth.
   - `--json` prints one JSON object per line. Each object has `depth`, `path`, `name`, `is_folder`, `size`, and `object_id`.
 - `cp` copies from the device to a local path. Each `SRC` is a device path. `DEST` is a local path. `cp` never writes to the device.
-- `verify` checks the files in `DEST` against the manifest in `DEST/.win-iphone-dcim/manifest.jsonl`.
+- `verify` checks the files in `DEST` against the manifest in `DEST/.win-iphone-dcim/manifest.jsonl`. Only `cp --manifest` writes it. Without a manifest, `verify` logs `no manifest; run cp with --manifest to record copies`.
   - Each record needs a file with the recorded size. `--hash` also recomputes the stored BLAKE3 hash.
   - A file under `DEST` without a record is `unrecorded`. `verify` ignores `.win-iphone-dcim/` and `*.part` files.
   - `verify` prints one line per file and `[verify] ok=N missing=N size-mismatch=N hash-mismatch=N unrecorded=N`. The exit code is `0` if all files are ok, otherwise `1`.
@@ -228,8 +228,9 @@ win-iphone-dcim.exe verify [--hash] DEST
 - `-n` (no-clobber) skips every existing target file silently. `-n` and `-f` cannot be used together.
 - The tool never overwrites a file in place.
 - Add `-i` (interactive replace or skip prompt) only in a later version.
-- Every `cp` writes the JSONL manifest to `DEST/.win-iphone-dcim/manifest.jsonl`. Every `cp` applies the incremental rules in section 7.
-- A second `cp` of the same tree skips the verified files.
+- `cp --manifest` writes the JSONL manifest to `DEST/.win-iphone-dcim/manifest.jsonl`. Every `cp` applies the incremental rules in section 7.
+- Without `--manifest`, `cp` creates no `.win-iphone-dcim` folder. `DEST` gets only the copied files.
+- A second `cp` of the same tree skips the files that exist with the device size. With `--manifest`, it skips only the verified files.
 - A separate `sync` command does not exist.
 
 ### `cp` flags
@@ -242,7 +243,8 @@ win-iphone-dcim.exe verify [--hash] DEST
 | `-p` | false | Preserve timestamps. After the commit, set the local modified time, and the created time where Windows allows it, from `WPD_OBJECT_DATE_MODIFIED` and `WPD_OBJECT_DATE_CREATED`. If the device gives no date, keep the copy time and log it |
 | `-a` | false | Archive mode. Equal to `-r -p`. Permissions, ownership and links do not exist on the device, so `-a` preserves only timestamps |
 | `--dry-run` | false | Enumerate and print the copy plan only. Do not write files |
-| `--verify size\|local-hash` | size | Verification mode for the incremental rules of section 7 |
+| `--verify size\|local-hash` | size | Verification mode for the incremental rules of section 7. `local-hash` requires `--manifest` |
+| `--manifest` | false | Read and write `DEST/.win-iphone-dcim/manifest.jsonl` and use the manifest rules of section 7 |
 
 ### Global flags
 
@@ -309,7 +311,7 @@ enumerated file entry
   -> ensure bytes copied match expected WPD size (if provided)
   -> rename .part to final path ONLY when target does not already exist
      (with -f: replace the target atomically)
-  -> append committed manifest record
+  -> append committed manifest record (only with --manifest)
 ```
 
 - Use the optimal buffer size that the driver returns. Apply reasonable lower and upper limits to abnormal values, for example 64 KiB to 4 MiB. Adjust these limits after benchmarks on real devices.
@@ -321,6 +323,15 @@ enumerated file entry
 - Do not skip a file on its file name alone. The content or metadata of a file on the iPhone can change.
 
 ### Incremental rules
+
+Without `--manifest` (the default):
+
+- No target file → Copy the file.
+- An existing target file with the device size → Skip the file as `exists, same size`. Log it as a normal skip, not as a warning, and do not count it in `exists`. The tool does not claim that the file is verified.
+- An existing target file with a different size, an unknown device size, or a target that this run copied from another source → Report a conflict. By default, warn, skip, and keep the existing file. With `-f`, replace it.
+- With `-f`, a same-size file is replaced as well.
+
+With `--manifest`:
 
 - A **completed manifest record**, an existing target file, and a matching size → Skip the file.
 - An enabled `local-hash` mode and a stored hash in the manifest → Recompute the hash. Skip the file only if the hash matches.
@@ -354,7 +365,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 ## 9. Security, paths, and data integrity
 
 - For names that come from the device: sanitize or reject absolute paths, `..`, drive prefixes, UNC paths, invalid Windows file names, reserved names (such as CON, NUL), and path traversal.
-- Treat case-insensitive collisions on Windows, duplicate file names, and illegal characters as errors. **For an unsafe name or a collision, report an error and stop the transfer of that file**. An existing target file is not such an error: the tool warns and skips it, or replaces it with `-f` (section 5). Never overwrite silently. Never rename silently and then call the result "structure fully preserved".
+- Treat case-insensitive collisions on Windows, duplicate file names, and illegal characters as errors. **For an unsafe name or a collision, report an error and stop the transfer of that file**. An existing target file is not such an error: the tool skips it (with a warning, except a same-size file without `--manifest`), or replaces it with `-f` (sections 5 and 7). Never overwrite silently. Never rename silently and then call the result "structure fully preserved".
 - Do not use EXIF dates to make folders or to rename files.
 - Do not use the modification time as the only criterion. The file size and time from the device can be missing or incorrect. Timestamps that `-p` preserves are metadata only. Do not use them in skip or verify decisions.
 - Do not delete extra files at the destination by default. This prevents accidental loss of past backups.
@@ -419,14 +430,14 @@ Goal: give the user a window to select folders and files from the DCIM tree, the
 - [x] Show the DCIM tree with checkboxes. Show the file name, the size, and the folder path. Do not show the WPD object ID.
 - [x] Let the user open a folder in the tree and browse its files, as in a file manager. Show a list view with name, size, and date.
 - [x] Open a file with the Windows default application when the user double-clicks it. Windows applications cannot read a WPD stream directly. Download the file first to a local cache folder. Then call `ShellExecuteW` with the `open` verb on the cached file.
-- [x] Put the cache in `<cache folder>\<device-id-hash>\<relative path>`. The cache folder is `cache` next to the GUI exe, or `cache_dir` from the read-only `win-iphone-dcim.toml` next to the exe or `WIN_IPHONE_DCIM_CACHE_DIR`. If it is not writable, use `%LOCALAPPDATA%\win-iphone-dcim\cache`. Keep the cache under a soft size limit (default 512 MiB): before a download, delete the least recently used files; never refuse the download. Keep the GUI portable: save no settings. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
+- [x] Put the cache in `<cache folder>\<device-id-hash>\<relative path>`. The cache folder is `win-iphone-dcim-cache` next to the GUI exe, or `cache_dir` from the read-only `win-iphone-dcim.toml` next to the exe or `WIN_IPHONE_DCIM_CACHE_DIR`. If it is not writable, use `%LOCALAPPDATA%\win-iphone-dcim\cache`. Keep the cache under a soft size limit (default 512 MiB): before a download, delete the least recently used files; never refuse the download. Keep the GUI portable: save no settings. Reuse a cached file when its size matches the WPD size. Show a progress indicator during the download. Let the user clear the cache from the GUI.
 - [x] Give the cached file its original file name and extension. Then Windows picks the correct application for HEIC, MOV, DNG, and other types.
 - [x] Do not open the file from the GUI before the download is complete. A partial file can crash the viewer.
 - [x] Implement a COM `IDataObject` that offers `CFSTR_FILEDESCRIPTORW` and `CFSTR_FILECONTENTS`. Give each `FILEDESCRIPTORW` the relative path under `DCIM`, the `FD_FILESIZE` flag with the WPD size, and `FD_ATTRIBUTES` for folders. Supply each `CFSTR_FILECONTENTS` as an `IStream` that reads from the WPD stream on demand.
 - [x] Put the `IDataObject` on the clipboard with `OleSetClipboard`. Also support drag and drop with `DoDragDrop`. Explorer pulls the data from this process, so the process must stay open until the paste completes.
 - [x] Serve one `IStream` at a time from the worker process over IPC. Keep all WPD COM objects in the worker. Do not pass COM pointers to the GUI process.
 - [x] Let Explorer handle conflicts. Do not add a second conflict dialog.
-- [x] Add an in-app copy mode that uses the Phase 1/2 transfer engine and the manifest. Use it when the user wants verification and an incremental copy. The Explorer paste mode has no manifest and no verification.
+- [x] Add an in-app copy mode that uses the Phase 1/2 transfer engine and the incremental rules. It writes the manifest only with `manifest = true` in the config or `WIN_IPHONE_DCIM_MANIFEST`. Use it when the user wants verification and an incremental copy. The Explorer paste mode has no manifest and no verification.
 - [x] Use a Rust GUI toolkit that compiles with the MSVC target and does not need a web runtime. Evaluate `egui`/`eframe` first. Evaluate native Win32 controls second.
 
 Known limits:

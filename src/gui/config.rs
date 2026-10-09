@@ -3,9 +3,10 @@
 //! not read it.
 //!
 //! ```toml
-//! cache_dir = "cache"          # relative to the exe folder
+//! cache_dir = "win-iphone-dcim-cache"  # relative to the exe folder
 //! cache_max = "512MiB"         # or an integer of bytes
 //! clear_cache_on_exit = true
+//! manifest = false             # write DEST/.win-iphone-dcim/manifest.jsonl
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -20,16 +21,19 @@ pub const DEFAULT_CACHE_MAX: u64 = 512 * 1024 * 1024;
 pub const ENV_CACHE_DIR: &str = "WIN_IPHONE_DCIM_CACHE_DIR";
 pub const ENV_CACHE_MAX: &str = "WIN_IPHONE_DCIM_CACHE_MAX";
 pub const ENV_CLEAR_CACHE_ON_EXIT: &str = "WIN_IPHONE_DCIM_CLEAR_CACHE_ON_EXIT";
+pub const ENV_MANIFEST: &str = "WIN_IPHONE_DCIM_MANIFEST";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// The cache base folder. `None` means the default `cache` folder next
-    /// to the exe.
+    /// The cache base folder. `None` means the default
+    /// `win-iphone-dcim-cache` folder next to the exe.
     pub cache_dir: Option<PathBuf>,
     /// The soft size limit of the cache, in bytes.
     pub cache_max: u64,
     /// Delete the cache at start and at exit.
     pub clear_cache_on_exit: bool,
+    /// Copies write the manifest of the copy root, like `cp --manifest`.
+    pub manifest: bool,
 }
 
 impl Default for Config {
@@ -38,6 +42,7 @@ impl Default for Config {
             cache_dir: None,
             cache_max: DEFAULT_CACHE_MAX,
             clear_cache_on_exit: true,
+            manifest: false,
         }
     }
 }
@@ -49,6 +54,7 @@ struct RawFile {
     cache_dir: Option<toml::Value>,
     cache_max: Option<toml::Value>,
     clear_cache_on_exit: Option<toml::Value>,
+    manifest: Option<toml::Value>,
 }
 
 /// The folder of the running exe.
@@ -113,6 +119,12 @@ impl Config {
                 None => warnings.push(format!("{ENV_CLEAR_CACHE_ON_EXIT}: bad value {v:?}")),
             }
         }
+        if let Some(v) = env(ENV_MANIFEST) {
+            match parse_bool(&v) {
+                Some(b) => config.manifest = b,
+                None => warnings.push(format!("{ENV_MANIFEST}: bad value {v:?}")),
+            }
+        }
         config
     }
 
@@ -138,7 +150,71 @@ impl Config {
             Some(v) => warnings.push(format!("clear_cache_on_exit: not true or false: {v}")),
             None => {}
         }
+        match raw.manifest {
+            Some(toml::Value::Boolean(b)) => self.manifest = b,
+            Some(v) => warnings.push(format!("manifest: not true or false: {v}")),
+            None => {}
+        }
     }
+}
+
+/// The settings of the Preferences window. They last for the session only;
+/// `to_toml` gives the config file text that keeps them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preferences {
+    /// Copies write the manifest of the copy root.
+    pub manifest: bool,
+    /// Delete the cache at start and at exit.
+    pub clear_cache_on_exit: bool,
+    /// Copies replace existing files (`--force`). It has no config key.
+    pub force: bool,
+    /// The soft size limit of the cache, in bytes.
+    pub cache_max: u64,
+    /// The cache base folder in use, if any.
+    pub cache_dir: Option<PathBuf>,
+}
+
+impl Preferences {
+    pub fn new(config: &Config, cache_dir: Option<PathBuf>) -> Self {
+        Self {
+            manifest: config.manifest,
+            clear_cache_on_exit: config.clear_cache_on_exit,
+            force: false,
+            cache_max: config.cache_max,
+            cache_dir,
+        }
+    }
+
+    /// The config file keys and the current values.
+    pub fn to_toml(&self) -> String {
+        let mut text = format!(
+            "manifest = {}\nclear_cache_on_exit = {}\ncache_max = {}\n",
+            self.manifest,
+            self.clear_cache_on_exit,
+            format_size(self.cache_max)
+        );
+        if let Some(dir) = &self.cache_dir {
+            let value = toml::Value::String(dir.to_string_lossy().into_owned());
+            text.push_str(&format!("cache_dir = {value}\n"));
+        }
+        text
+    }
+}
+
+/// A size as a config value: a quoted size with the largest binary unit
+/// that divides it, or an integer of bytes.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1 << 40, "TiB"),
+        (1 << 30, "GiB"),
+        (1 << 20, "MiB"),
+        (1 << 10, "KiB"),
+    ];
+    UNITS
+        .iter()
+        .find(|(factor, _)| bytes > 0 && bytes.is_multiple_of(*factor))
+        .map(|(factor, unit)| format!("\"{}{unit}\"", bytes / factor))
+        .unwrap_or_else(|| bytes.to_string())
 }
 
 fn resolve_dir(dir: &Path, exe_dir: Option<&Path>) -> PathBuf {

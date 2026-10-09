@@ -174,7 +174,8 @@ pub enum Command {
     /// name. `SRC/` with a trailing slash copies the folder contents only.
     /// If DEST does not exist and there is one SRC, DEST is the new file or
     /// folder. With two or more SRC, DEST must be an existing folder. An
-    /// existing local file is skipped with a warning unless -f is given.
+    /// existing local file of the same size is skipped. Another existing
+    /// local file is skipped with a warning unless -f is given.
     Cp {
         /// Copy folders recursively. A folder SRC needs this flag.
         #[arg(short = 'r')]
@@ -201,11 +202,22 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Verification mode. `size` compares sizes with the manifest.
-        /// `local-hash` also stores a BLAKE3 hash of each new copy and checks
-        /// it before a skip.
-        #[arg(long, value_enum, value_name = "MODE")]
+        /// Verification mode. `size` compares sizes with the device.
+        /// `local-hash` also stores a BLAKE3 hash of each new copy in the
+        /// manifest and checks it before a skip. `local-hash` requires
+        /// --manifest.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "MODE",
+            requires_if("local-hash", "manifest")
+        )]
         verify: Option<VerifyMode>,
+
+        /// Write DEST/.win-iphone-dcim/manifest.jsonl and use it for the
+        /// incremental rules and for `verify`. Off by default.
+        #[arg(long)]
+        manifest: bool,
 
         /// Device paths. A trailing `/` copies the folder contents only.
         #[arg(value_name = "SRC", required = true, num_args = 1..)]

@@ -65,6 +65,8 @@ pub enum Request {
         what: CopySet,
         dest: PathBuf,
         force: bool,
+        /// Write the manifest of the copy root, like `cp --manifest`.
+        manifest: bool,
         /// Files and bytes of the set, if the UI knows them. `None` makes
         /// the device thread walk the set first.
         totals: Option<(u64, u64)>,
@@ -75,6 +77,9 @@ pub enum Request {
     },
     /// Delete the cache folder of the open device.
     ClearCache,
+    /// Set the soft size limit of the cache, in bytes, for the next
+    /// download.
+    SetCacheMax(u64),
     /// Walk `paths` and their folders for an Explorer paste. The listing
     /// goes into `slot`, because the UI thread may be inside a drag loop
     /// and read no replies.
@@ -317,9 +322,12 @@ impl DeviceThread {
                 what,
                 dest,
                 force,
+                manifest,
                 totals,
             } => {
-                let result = self.copy(&what, &dest, force, totals).map_err(text);
+                let result = self
+                    .copy(&what, &dest, force, manifest, totals)
+                    .map_err(text);
                 self.out.send(Reply::CopyDone(result));
             }
             Request::Download { path } => match self.download(&path) {
@@ -340,6 +348,7 @@ impl DeviceThread {
                     .map_err(text);
                 self.out.send(Reply::CacheCleared(result));
             }
+            Request::SetCacheMax(bytes) => self.cache_max = bytes,
             Request::Enumerate { paths, slot } => {
                 let result = self.enumerate(&paths).map_err(text).map(|items| {
                     let listing = Listing::new(&items, filedesc::device_filetime);
@@ -498,6 +507,7 @@ impl DeviceThread {
         what: &CopySet,
         dest: &Path,
         force: bool,
+        manifest: bool,
         totals: Option<(u64, u64)>,
     ) -> Result<CopySummary> {
         // One memo for the scan and the copy: each folder is listed once.
@@ -527,6 +537,7 @@ impl DeviceThread {
             } else {
                 OnExists::SkipWarn
             },
+            manifest,
             ..CopyOptions::default()
         };
         let mut out = std::io::sink();

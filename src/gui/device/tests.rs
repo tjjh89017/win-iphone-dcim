@@ -98,6 +98,7 @@ fn browse_and_copy_the_checked_set() {
         what: CopySet::Checked(tree.selection()),
         dest: dest.path().to_path_buf(),
         force: false,
+        manifest: true,
         totals: None,
     });
     let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
@@ -142,6 +143,7 @@ fn browse_and_copy_the_checked_set() {
         what: CopySet::Checked(tree.selection()),
         dest: dest.path().to_path_buf(),
         force: false,
+        manifest: true,
         totals: None,
     });
     let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
@@ -169,6 +171,7 @@ fn copy_to_copies_the_given_paths() {
         ]),
         dest: dest.path().to_path_buf(),
         force: false,
+        manifest: false,
         totals: None,
     });
     let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
@@ -181,6 +184,28 @@ fn copy_to_copies_the_given_paths() {
         std::fs::read(dest.path().join("IMG_0001.HEIC")).unwrap(),
         b"heic-b"
     );
+    // Without the manifest option the destination gets the files only.
+    assert!(!dest.path().join(".win-iphone-dcim").exists());
+
+    // A second copy keeps the same-size files and does not warn.
+    h.send(Request::Copy {
+        what: CopySet::Paths(vec!["/Internal Storage/DCIM/202601_a".into()]),
+        dest: dest.path().to_path_buf(),
+        force: false,
+        manifest: false,
+        totals: None,
+    });
+    let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
+    let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+        panic!("copy failed");
+    };
+    assert_eq!((summary.copied, summary.skipped, summary.exists), (0, 2, 0));
+    assert!(
+        replies.iter().any(
+            |r| matches!(r, Reply::CopyNote(Note::Skip, t) if t.ends_with("exists, same size"))
+        )
+    );
+    assert!(!dest.path().join(".win-iphone-dcim").exists());
 }
 
 fn copy_paths(h: &DeviceHandle, dest: &Path, totals: Option<(u64, u64)>) -> Vec<Reply> {
@@ -191,6 +216,7 @@ fn copy_paths(h: &DeviceHandle, dest: &Path, totals: Option<(u64, u64)>) -> Vec<
         ]),
         dest: dest.to_path_buf(),
         force: false,
+        manifest: false,
         totals,
     });
     let replies = until(h, |r| matches!(r, Reply::CopyDone(_)));
@@ -270,6 +296,7 @@ fn cancel_before_copy_copies_nothing() {
         what: CopySet::Checked(tree.selection()),
         dest: dest.path().to_path_buf(),
         force: false,
+        manifest: false,
         totals: None,
     });
     let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
@@ -340,6 +367,19 @@ fn download_evicts_older_files_over_the_limit() {
     assert!(heic.exists());
     let other = download(&h, "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC");
     assert!(heic.exists() && other.exists());
+}
+
+#[test]
+fn set_cache_max_applies_to_the_next_download() {
+    let cache = tempfile::tempdir().unwrap();
+    let h = handle(cache.path());
+    let mut tree = open(&h);
+    load(&h, &mut tree, "/");
+    let mov = download(&h, "/Internal Storage/DCIM/202601_a/IMG_0002.MOV");
+    h.send(Request::SetCacheMax(2050));
+    let heic = download(&h, "/Internal Storage/DCIM/202601_a/IMG_0001.HEIC");
+    assert!(!mov.exists());
+    assert!(heic.exists());
 }
 
 #[test]

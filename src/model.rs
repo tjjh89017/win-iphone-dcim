@@ -224,6 +224,9 @@ pub enum SyncDecision {
     /// A completed manifest record, the target file, and the device agree
     /// on the size (and on the hash with `--verify local-hash`). Keep it.
     SkipVerified,
+    /// No manifest is in use, and a local file of the device size is at the
+    /// target. Keep it and report it as a normal skip.
+    SkipSameSize,
     /// A local file is at the target and it is not verified. Keep it.
     /// `warn` is false with `-n`.
     SkipExists { state: ExistingState, warn: bool },
@@ -239,7 +242,8 @@ pub enum ExistingState {
     /// device, or the local hash does not match. The text says which.
     Conflict(String),
     /// No manifest record, but the size matches the device. The tool does
-    /// not claim that this file is a good backup.
+    /// not claim that this file is a good backup. Without a manifest, `-f`
+    /// replaces such a file with this state.
     UnverifiedExisting,
     /// A manifest record matches the local file, but the device gives no
     /// size, so the tool cannot compare.

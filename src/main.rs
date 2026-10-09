@@ -108,6 +108,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
             archive,
             dry_run,
             verify,
+            manifest,
             sources,
             dest,
         } => {
@@ -133,6 +134,7 @@ fn run(cli: &Cli) -> Result<usize, Error> {
                 retries: cli.retries,
                 sleep: std::thread::sleep,
                 diagnostic: cli.diagnostic,
+                manifest: *manifest,
             };
             cmd::cp::run(fs.as_ref(), sources, dest, opts, &mut out)?
         }

@@ -20,11 +20,12 @@ Works now:
   slash rules. Each file goes to a `.part` file first and gets its final name
   only after a size check. Progress bar, `-p`/`-a` timestamps, `-f`
   overwrite, `--dry-run`, and an error summary.
-- Incremental copy with a JSONL manifest in `DEST/.win-iphone-dcim/`. A
-  second `cp` of the same tree skips the verified files.
+- Incremental copy: a second `cp` of the same tree skips the files that
+  exist with the same size. `--manifest` adds a JSONL manifest in
+  `DEST/.win-iphone-dcim/` and skips only verified files.
 - Retries with backoff for transient errors (`--retries`).
-- `--verify local-hash`: a BLAKE3 hash of each new copy.
-- `verify`: check DEST against the manifest.
+- `--verify local-hash` (with `--manifest`): a BLAKE3 hash of each new copy.
+- `verify`: check DEST against the manifest of a `cp --manifest`.
 - Worker process isolation with a watchdog (`--timeout`), so a blocked WPD
   call cannot hang the tool. See [Worker process](#worker-process).
 
@@ -139,9 +140,11 @@ Commands:
     `size-unavailable`. On a failure the `.part` file is removed. A `.part`
     file from an earlier run is never treated as a complete file. The tool
     logs it and leaves it in place.
-  - Every copied file gets a record in the manifest. An existing target
-    file follows the [incremental rules](#manifest-and-incremental-copy):
-    a verified file is skipped (`[skip] <path>  verified`). Any other
+  - An existing target file follows the
+    [incremental rules](#manifest-and-incremental-copy). By default, a file
+    with the device size is skipped (`[skip] <path>  exists, same size`).
+    With `--manifest`, every copied file gets a record in the manifest and
+    only a verified file is skipped (`[skip] <path>  verified`). Any other
     existing file is skipped with a warning
     (`[skip] <path>  conflict: ... (use --force to replace)`). A skip is not a
     failure.
@@ -159,9 +162,11 @@ Commands:
     file.
   - `--dry-run` prints the decision for every file (`[plan]`, `[skip]`,
     `[error]`) and writes nothing, not even the manifest.
-  - `--verify size` is the default. `--verify local-hash` hashes each new
-    copy with BLAKE3 while the bytes go to disk (no second read) and stores
-    the hash. Before a skip it hashes the local file again and skips only if
+  - `--manifest` writes `DEST/.win-iphone-dcim/manifest.jsonl`. It is off
+    by default: DEST then gets only the copied files.
+  - `--verify size` is the default. `--verify local-hash` requires
+    `--manifest`. It hashes each new copy with BLAKE3 while the bytes go to
+    disk (no second read) and stores the hash in the manifest. Before a skip it hashes the local file again and skips only if
     the hash matches.
   - On a terminal, stderr shows an overall line (files, bytes, elapsed,
     current and average speed, ETA once the listing is done) and a bar for
@@ -221,13 +226,19 @@ The window:
 - Menu bar: File (Refresh devices, Destination..., Copy to folder, Copy
   to..., Cancel copy, Overwrite existing, Open, Open cache folder,
   Properties, Clear cache, Clear cache on exit, Exit), Edit (Select all,
-  Deselect all, Check all, Uncheck all, Copy (paste in Explorer)), View
-  (Back, Forward, Up, Refresh folder, sort column and order) and Help
+  Deselect all, Check all, Uncheck all, Copy (paste in Explorer),
+  Preferences...), View (Back, Forward, Up, Refresh folder, sort column and
+  order) and Help
   (About: version, repository link, copyright and license). The items do
   the same as the top bar, the right-click menus and the shortcuts, and are
   disabled under the same conditions. Copy to..., Copy (paste in Explorer),
   Open, Open cache folder and Properties act on the selected rows, or on
   the checked items when no row is selected.
+- Edit > Preferences...: "Write manifest", "Clear cache on exit",
+  "Overwrite existing files (--force)", the cache size limit in MiB (it
+  applies to the next download), and the cache folder. The settings last for
+  this run only. The window shows the matching `win-iphone-dcim.toml` text
+  with a Copy button, so you can keep them in the config file.
 - Top bar: the device list, Refresh, the destination folder (Destination...),
   "Overwrite existing (--force)", "Copy to folder" (Cancel while a copy runs), Clear
   cache, and a status text. Refresh lists the devices again and reloads the
@@ -300,8 +311,10 @@ checkbox). The copy starts at the deepest folder that holds all checked
 items and copies only the checked items below it. For example, checked
 items in `202601_a` and `202601_b` go to `DEST\DCIM\202601_a` and
 `DEST\DCIM\202601_b`. "Copy to..." asks for a folder and copies the
-selected items, like `cp -r -p <items> DEST`. Both use the manifest and the
-incremental rules of `cp`, so a second copy skips verified files. Cancel
+selected items, like `cp -r -p <items> DEST`. Both use the incremental
+rules of `cp`, so a second copy skips the files that exist with the same
+size. With `manifest = true` in the config they write the manifest, like
+`cp --manifest`. Cancel
 stops after the current file.
 
 Double-click on a file downloads it to the cache, then opens it with the
@@ -362,7 +375,20 @@ Limits:
 
 ## Manifest and incremental copy
 
-`cp` writes `DEST/.win-iphone-dcim/manifest.jsonl`. DEST is the copy root that
+Without `--manifest`, `cp` writes no manifest and no `.win-iphone-dcim`
+folder. For each file:
+
+| Situation | Default | With `-f` |
+| --- | --- | --- |
+| No local file | Copy | Same |
+| Local file with the device size | Skip as `exists, same size`, no warning, not in `exists` | Replace |
+| Local file with a different size, or the device gives no size | Conflict: warn, skip, count in `exists` | Replace |
+| A file that this run copied from another source | Conflict: warn, skip, count in `exists` | Replace |
+
+A same-size skip does not check the bytes. Use `--manifest` for verified
+skips.
+
+`cp --manifest` writes `DEST/.win-iphone-dcim/manifest.jsonl`. DEST is the copy root that
 you give to `cp`: the DEST folder, or the parent folder when DEST is a new
 file name. The tool creates the folder on the first write.
 
@@ -384,7 +410,8 @@ Each committed file appends one JSON line:
   record for the same path replaces an earlier one.
 
 Before a run, the tool compares each record with the local file. A missing
-file or a different size makes the record stale. Then, for each file:
+file or a different size makes the record stale. Then, with `--manifest`,
+for each file:
 
 | Situation | Default | With `-f` |
 | --- | --- | --- |
@@ -428,11 +455,12 @@ win-iphone-dcim.exe verify D:\iPhoneBackup
 win-iphone-dcim.exe verify --hash D:\iPhoneBackup
 ```
 
-`verify` reads the manifest in DEST and checks that each recorded file exists
+`verify` reads the manifest that `cp --manifest` wrote in DEST and checks that each recorded file exists
 with the recorded size. `--hash` also recomputes the BLAKE3 hash where the
 manifest has one. Files under DEST without a record are `unrecorded`. The
 `.win-iphone-dcim` folder and `*.part` files are ignored. `verify` never
-opens the device.
+opens the device. Without a manifest it logs
+`no manifest; run cp with --manifest to record copies`.
 
 It prints one line per file (`[ok]`, `[missing]`, `[size-mismatch]`,
 `[hash-mismatch]`, `[unrecorded]`) and a summary:
@@ -454,8 +482,9 @@ example `D:\iPhoneTest`.
 3. `tree "/Internal Storage/DCIM"` shows the same folders as File Explorer.
 4. `cp` of one HEIC file to DEST: the copy opens and has the device size.
 5. `cp -r` of one DCIM folder to DEST: all files are copied.
-6. Run the same `cp -r` again: every file is `[skip] ... verified`.
-7. `verify DEST` reports `missing=0 size-mismatch=0`.
+6. Run the same `cp -r` again: every file is `[skip] ... exists, same size`.
+   Run `cp -r --manifest` twice: the second run shows `[skip] ... verified`.
+7. `verify DEST` (after `cp --manifest`) reports `missing=0 size-mismatch=0`.
 8. Lock the iPhone and run `devices` and `ls /`: a clear error, no hang.
 9. Unplug the cable during a `cp -r` of a folder with large MOV files: watch
    for `[retry k/N]` lines, plug the cable back in and unlock the phone. No
@@ -479,16 +508,18 @@ results.
 The GUI keeps no settings and writes nothing to the registry or to
 `%APPDATA%`. It writes only:
 
-- the chosen copy destination and its manifest, and
-- the open-file cache, by default in a `cache` folder next to
+- the copied files in the chosen copy destination (and its manifest only
+  with `manifest = true`), and
+- the open-file cache, by default in a `win-iphone-dcim-cache` folder next to
   `win-iphone-dcim-gui.exe`. If that folder is not writable (for example
   under `Program Files`), the GUI logs one line and uses
   `%LOCALAPPDATA%\win-iphone-dcim\cache`.
 
 The cache folder exists only while it holds files. "Clear cache" and the
 clear at start and exit delete the folder itself, so a portable install
-leaves no empty `cache` folder next to the exe. A file that a viewer holds
-open keeps its folders.
+leaves no empty `win-iphone-dcim-cache` folder next to the exe. A file that a viewer holds
+open keeps its folders. The `win-iphone-dcim-cache` folder holds only temporary copies of
+opened files. It is safe to delete at any time while the GUI is closed.
 
 The cache has a soft size limit of 512 MiB. Before a download, the GUI
 deletes the least recently used cached files until the new file fits. A
@@ -499,14 +530,15 @@ An optional `win-iphone-dcim.toml` next to the GUI exe changes the
 defaults. The GUI only reads it. The CLI ignores it.
 
 ```toml
-cache_dir = "cache"          # a relative path starts at the exe folder
+cache_dir = "win-iphone-dcim-cache"  # a relative path starts at the exe folder
 cache_max = "2GiB"           # "512MiB", "2GiB", "5GB", or bytes: 1073741824
 clear_cache_on_exit = false  # default true; also clears at start
+manifest = true              # default false; copies write the manifest
 ```
 
 Environment variables override the file: `WIN_IPHONE_DCIM_CACHE_DIR`,
-`WIN_IPHONE_DCIM_CACHE_MAX`, `WIN_IPHONE_DCIM_CLEAR_CACHE_ON_EXIT` (`true`,
-`false`, `1`, `0`). A bad value is ignored with a warning in the log.
+`WIN_IPHONE_DCIM_CACHE_MAX`, `WIN_IPHONE_DCIM_CLEAR_CACHE_ON_EXIT` and
+`WIN_IPHONE_DCIM_MANIFEST` (`true`, `false`, `1`, `0`). A bad value is ignored with a warning in the log.
 
 ## Paths
 

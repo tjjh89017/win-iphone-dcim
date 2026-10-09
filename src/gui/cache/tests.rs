@@ -178,8 +178,11 @@ fn choose_base_prefers_the_exe_folder_and_falls_back() {
     let tmp = tempfile::tempdir().unwrap();
     let exe = tmp.path().join("app");
     std::fs::create_dir(&exe).unwrap();
-    assert_eq!(choose_base(None, Some(&exe)), Some(exe.join("cache")));
-    assert!(!exe.join("cache").exists());
+    assert_eq!(
+        choose_base(None, Some(&exe)),
+        Some(exe.join("win-iphone-dcim-cache"))
+    );
+    assert!(!exe.join("win-iphone-dcim-cache").exists());
     let configured = tmp.path().join("mine");
     assert_eq!(
         choose_base(Some(&configured), Some(&exe)),

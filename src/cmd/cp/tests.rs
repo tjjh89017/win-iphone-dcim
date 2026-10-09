@@ -382,10 +382,98 @@ fn existing_dest_folder_as_file_fails_the_subtree() {
     assert!(out.contains("[failed] target exists: 1"), "{out}");
 }
 
+// Without --manifest (the default).
+
+#[test]
+fn default_copy_writes_no_manifest_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (out, failures) = cp(&[DCIM], tmp.path(), rec()).unwrap();
+    assert_eq!(failures, 0);
+    assert!(out.contains("copied=3 skipped=0"), "{out}");
+    assert!(!tmp.path().join(crate::backup::manifest::DIR_NAME).exists());
+    let names: Vec<String> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["DCIM"]);
+}
+
+#[test]
+fn default_second_run_skips_same_size_quietly() {
+    let tmp = tempfile::tempdir().unwrap();
+    cp(&[DCIM], tmp.path(), rec()).unwrap();
+    let (out, failures) = cp(&[DCIM], tmp.path(), rec()).unwrap();
+    assert_eq!(failures, 0);
+    assert!(out.contains("IMG_0001.HEIC  exists, same size"), "{out}");
+    assert!(!out.contains("verified"), "{out}");
+    assert!(
+        out.contains("copied=0 skipped=3 exists=0 failed=0"),
+        "{out}"
+    );
+    assert!(!tmp.path().join(crate::backup::manifest::DIR_NAME).exists());
+}
+
+#[test]
+fn default_same_size_other_bytes_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("IMG_0001.HEIC"), b"HEIC-A").unwrap();
+    let (out, _) = cp(&[A1], tmp.path(), opts()).unwrap();
+    assert!(out.contains("copied=0 skipped=1 exists=0"), "{out}");
+    assert_eq!(
+        std::fs::read(tmp.path().join("IMG_0001.HEIC")).unwrap(),
+        b"HEIC-A"
+    );
+    // -f replaces it.
+    let force = CpOptions {
+        on_exists: OnExists::Overwrite,
+        ..opts()
+    };
+    let (out, _) = cp(&[A1], tmp.path(), force).unwrap();
+    assert!(out.contains("copied=1 skipped=0 exists=0"), "{out}");
+    assert_eq!(
+        std::fs::read(tmp.path().join("IMG_0001.HEIC")).unwrap(),
+        b"heic-a"
+    );
+    assert!(!tmp.path().join(crate::backup::manifest::DIR_NAME).exists());
+}
+
+#[test]
+fn default_size_mismatch_is_a_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("IMG_0001.HEIC"), b"old").unwrap();
+    let (out, _) = cp(&[A1], tmp.path(), opts()).unwrap();
+    assert!(out.contains("copied=0 skipped=1 exists=1"), "{out}");
+    let dry = CpOptions {
+        dry_run: true,
+        ..opts()
+    };
+    let (out, _) = cp(&[A1], tmp.path(), dry).unwrap();
+    assert!(
+        out.contains("conflict: local size 3, device size 6"),
+        "{out}"
+    );
+}
+
 // Phase 2: manifest, incremental rules, retries.
 
 use crate::backup::manifest::{Manifest, device_key};
 use std::cell::{Cell, RefCell};
+
+/// `cp --manifest`.
+fn mopts() -> CpOptions {
+    CpOptions {
+        manifest: true,
+        ..opts()
+    }
+}
+
+/// `cp -r --manifest`.
+fn mrec() -> CpOptions {
+    CpOptions {
+        manifest: true,
+        ..rec()
+    }
+}
 
 const RAW_ID: &str = r"\\?\usb#vid_05ac&pid_12a8&mi_00#00008030001a2b3c4d5e6f70#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
 
@@ -455,10 +543,10 @@ fn manifest_text(root: &Path) -> String {
 fn second_run_skips_verified_files() {
     let tmp = tempfile::tempdir().unwrap();
     let fs = Flaky::new(0, worker_restarted);
-    let (out, _) = cp_dyn(&fs, &[DCIM], tmp.path(), rec());
+    let (out, _) = cp_dyn(&fs, &[DCIM], tmp.path(), mrec());
     assert!(out.contains("copied=3 skipped=0"), "{out}");
     assert_eq!(manifest_text(tmp.path()).lines().count(), 3);
-    let (out, failures) = cp_dyn(&fs, &[DCIM], tmp.path(), rec());
+    let (out, failures) = cp_dyn(&fs, &[DCIM], tmp.path(), mrec());
     assert_eq!(failures, 0);
     assert!(
         out.contains("[skip] /Internal Storage/DCIM/202601_a/IMG_0001.HEIC  verified"),
@@ -477,7 +565,7 @@ fn second_run_skips_verified_files() {
 fn manifest_records_path_under_dest_and_hides_device_id() {
     let tmp = tempfile::tempdir().unwrap();
     let fs = Flaky::new(0, worker_restarted);
-    cp_dyn(&fs, &[DCIM], tmp.path(), rec());
+    cp_dyn(&fs, &[DCIM], tmp.path(), mrec());
     let text = manifest_text(tmp.path());
     assert!(!text.contains(RAW_ID));
     assert!(!text.contains("00008030001a2b3c4d5e6f70"));
@@ -495,17 +583,17 @@ fn manifest_records_path_under_dest_and_hides_device_id() {
 #[test]
 fn single_file_to_new_name_records_in_parent() {
     let tmp = tempfile::tempdir().unwrap();
-    cp(&[B1], &tmp.path().join("b.heic"), opts()).unwrap();
+    cp(&[B1], &tmp.path().join("b.heic"), mopts()).unwrap();
     let m = Manifest::load(tmp.path()).unwrap();
     assert!(m.get("b.heic").is_some());
-    let (out, _) = cp(&[B1], &tmp.path().join("b.heic"), opts()).unwrap();
+    let (out, _) = cp(&[B1], &tmp.path().join("b.heic"), mopts()).unwrap();
     assert!(out.contains("verified"), "{out}");
 }
 
 #[test]
 fn truncated_last_manifest_line_is_skipped() {
     let tmp = tempfile::tempdir().unwrap();
-    cp(&[DCIM], tmp.path(), rec()).unwrap();
+    cp(&[DCIM], tmp.path(), mrec()).unwrap();
     let path = Manifest::path_for(tmp.path());
     let mut f = std::fs::OpenOptions::new()
         .append(true)
@@ -514,12 +602,12 @@ fn truncated_last_manifest_line_is_skipped() {
     f.write_all(br#"{"v":1,"path":"DCIM/202601_a/IMG_0002.M"#)
         .unwrap();
     drop(f);
-    let (out, failures) = cp(&[DCIM], tmp.path(), rec()).unwrap();
+    let (out, failures) = cp(&[DCIM], tmp.path(), mrec()).unwrap();
     assert_eq!(failures, 0);
     assert!(out.contains("copied=0 skipped=3 exists=0"), "{out}");
     // A new record after the broken line is still readable.
     std::fs::remove_file(tmp.path().join("DCIM/202601_b/IMG_0001.HEIC")).unwrap();
-    let (out, _) = cp(&[DCIM], tmp.path(), rec()).unwrap();
+    let (out, _) = cp(&[DCIM], tmp.path(), mrec()).unwrap();
     assert!(out.contains("copied=1 skipped=2"), "{out}");
     let m = Manifest::load(tmp.path()).unwrap();
     assert_eq!(m.len(), 3);
@@ -528,23 +616,23 @@ fn truncated_last_manifest_line_is_skipped() {
 #[test]
 fn stale_record_is_a_conflict() {
     let tmp = tempfile::tempdir().unwrap();
-    cp(&[A1], tmp.path(), opts()).unwrap();
+    cp(&[A1], tmp.path(), mopts()).unwrap();
     // The record says 99 bytes; the local file and the device say 6.
     let path = Manifest::path_for(tmp.path());
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, text.replace("\"size\":6", "\"size\":99")).unwrap();
-    let (out, failures) = cp(&[A1], tmp.path(), opts()).unwrap();
+    let (out, failures) = cp(&[A1], tmp.path(), mopts()).unwrap();
     assert_eq!(failures, 0);
     assert!(out.contains("copied=0 skipped=1 exists=1"), "{out}");
     let force = CpOptions {
         on_exists: OnExists::Overwrite,
-        ..opts()
+        ..mopts()
     };
     let (out, _) = cp(&[A1], tmp.path(), force).unwrap();
     assert!(out.contains("copied=1"), "{out}");
     let m = Manifest::load(tmp.path()).unwrap();
     assert_eq!(m.get("IMG_0001.HEIC").unwrap().record.size, 6);
-    let (out, _) = cp(&[A1], tmp.path(), opts()).unwrap();
+    let (out, _) = cp(&[A1], tmp.path(), mopts()).unwrap();
     assert!(out.contains("verified"), "{out}");
 }
 
@@ -553,7 +641,7 @@ fn unverified_existing_is_skipped_and_not_recorded() {
     let tmp = tempfile::tempdir().unwrap();
     // Same size as the device file, but no manifest record.
     std::fs::write(tmp.path().join("IMG_0001.HEIC"), b"HEIC-A").unwrap();
-    let (out, failures) = cp(&[A1], tmp.path(), opts()).unwrap();
+    let (out, failures) = cp(&[A1], tmp.path(), mopts()).unwrap();
     assert_eq!(failures, 0);
     assert!(out.contains("copied=0 skipped=1 exists=1"), "{out}");
     assert!(!out.contains("verified"), "{out}");
@@ -563,12 +651,12 @@ fn unverified_existing_is_skipped_and_not_recorded() {
         b"HEIC-A"
     );
     // A second run still does not claim it.
-    let (out, _) = cp(&[A1], tmp.path(), opts()).unwrap();
+    let (out, _) = cp(&[A1], tmp.path(), mopts()).unwrap();
     assert!(out.contains("exists=1"), "{out}");
     // -f replaces it and records it.
     let force = CpOptions {
         on_exists: OnExists::Overwrite,
-        ..opts()
+        ..mopts()
     };
     cp(&[A1], tmp.path(), force).unwrap();
     assert_eq!(
@@ -588,7 +676,7 @@ fn local_hash_is_stored_and_a_mismatch_is_a_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let hashed = CpOptions {
         local_hash: true,
-        ..opts()
+        ..mopts()
     };
     let (out, _) = cp(&[A1], tmp.path(), hashed).unwrap();
     assert!(out.contains("local-hash"), "{out}");
@@ -607,20 +695,20 @@ fn local_hash_is_stored_and_a_mismatch_is_a_conflict() {
     assert_eq!(failures, 0);
     assert!(out.contains("copied=0 skipped=1 exists=1"), "{out}");
     // Size mode does not read the file, so it skips.
-    let (out, _) = cp(&[A1], tmp.path(), opts()).unwrap();
+    let (out, _) = cp(&[A1], tmp.path(), mopts()).unwrap();
     assert!(out.contains("verified"), "{out}");
 }
 
 #[test]
 fn dry_run_prints_decisions_and_writes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
-    cp(&[DCIM], tmp.path(), rec()).unwrap();
+    cp(&[DCIM], tmp.path(), mrec()).unwrap();
     std::fs::write(tmp.path().join("DCIM/202601_b/IMG_0001.HEIC"), b"x").unwrap();
     std::fs::remove_file(tmp.path().join("DCIM/202601_a/IMG_0002.MOV")).unwrap();
     let before = manifest_text(tmp.path());
     let dry = CpOptions {
         dry_run: true,
-        ..rec()
+        ..mrec()
     };
     let (out, _) = cp(&[DCIM], tmp.path(), dry).unwrap();
     assert!(

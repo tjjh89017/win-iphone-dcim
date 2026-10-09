@@ -109,3 +109,73 @@ fn sizes_parse_with_and_without_units() {
     assert_eq!(parse_size("3 parsecs"), None);
     assert_eq!(parse_size("99999999999TiB"), None);
 }
+
+#[test]
+fn manifest_is_off_by_default_and_read_from_file_and_env() {
+    let (config, _) = resolve(None, &no_env);
+    assert!(!config.manifest);
+    let (config, warnings) = resolve(Some("manifest = true"), &no_env);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(config.manifest);
+    let env = |name: &str| (name == ENV_MANIFEST).then(|| "0".to_string());
+    let (config, _) = resolve(Some("manifest = true"), &env);
+    assert!(!config.manifest);
+    let env = |name: &str| (name == ENV_MANIFEST).then(|| "yes".to_string());
+    let (config, _) = resolve(None, &env);
+    assert!(config.manifest);
+}
+
+#[test]
+fn bad_manifest_value_is_ignored_with_a_warning() {
+    let (config, warnings) = resolve(Some("manifest = \"on\""), &no_env);
+    assert!(!config.manifest);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let env = |name: &str| (name == ENV_MANIFEST).then(|| "maybe".to_string());
+    let (config, warnings) = resolve(None, &env);
+    assert!(!config.manifest);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+}
+
+#[test]
+fn format_size_picks_the_largest_exact_unit() {
+    assert_eq!(format_size(512 << 20), "\"512MiB\"");
+    assert_eq!(format_size(2 << 30), "\"2GiB\"");
+    assert_eq!(format_size(3 << 10), "\"3KiB\"");
+    assert_eq!(format_size(1536), "1536");
+    assert_eq!(format_size(0), "0");
+}
+
+#[test]
+fn preferences_to_toml_lists_the_keys_and_values() {
+    let prefs = Preferences::new(&Config::default(), Some(PathBuf::from("/app/cache")));
+    assert_eq!(
+        prefs.to_toml(),
+        "manifest = false\nclear_cache_on_exit = true\ncache_max = \"512MiB\"\ncache_dir = \"/app/cache\"\n"
+    );
+    let prefs = Preferences {
+        cache_dir: None,
+        ..prefs
+    };
+    assert!(!prefs.to_toml().contains("cache_dir"));
+}
+
+#[test]
+fn preferences_toml_reads_back_as_the_same_config() {
+    let prefs = Preferences {
+        manifest: true,
+        clear_cache_on_exit: false,
+        force: true,
+        cache_max: 3 << 30,
+        cache_dir: Some(PathBuf::from(r#"/data/it's "my" cache\x"#)),
+    };
+    let text = prefs.to_toml();
+    let (config, warnings) = resolve(Some(&text), &no_env);
+    assert!(warnings.is_empty(), "{warnings:?}\n{text}");
+    assert!(config.manifest);
+    assert!(!config.clear_cache_on_exit);
+    assert_eq!(config.cache_max, 3 << 30);
+    assert_eq!(
+        config.cache_dir,
+        Some(PathBuf::from(r#"/data/it's "my" cache\x"#))
+    );
+}

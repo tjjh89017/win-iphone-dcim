@@ -143,16 +143,31 @@ fn cp_conflict_and_archive_flags() {
 
 #[test]
 fn cp_verify_values() {
-    let cli = parse(&["cp", "--verify", "local-hash", "/a", "x"]).unwrap();
+    let cli = parse(&["cp", "--manifest", "--verify", "local-hash", "/a", "x"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Cp {
             verify: Some(VerifyMode::LocalHash),
+            manifest: true,
             ..
         }
     ));
+    let err = parse(&["cp", "--verify", "local-hash", "/a", "x"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     assert!(parse(&["cp", "--verify", "size", "/a", "x"]).is_ok());
     assert!(parse(&["cp", "--verify", "md5", "/a", "x"]).is_err());
+}
+
+#[test]
+fn cp_manifest_is_off_by_default() {
+    let cli = parse(&["cp", "/a", "x"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Cp {
+            manifest: false,
+            ..
+        }
+    ));
 }
 
 #[test]

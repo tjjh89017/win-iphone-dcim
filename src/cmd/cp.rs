@@ -38,6 +38,8 @@ pub struct CpOptions {
     pub sleep: fn(std::time::Duration),
     /// `--diagnostic`: log the raw device ID.
     pub diagnostic: bool,
+    /// `--manifest`: read and write the manifest of the copy root.
+    pub manifest: bool,
 }
 
 impl Default for CpOptions {
@@ -53,6 +55,7 @@ impl Default for CpOptions {
             retries: d.retries,
             sleep: d.sleep,
             diagnostic: d.diagnostic,
+            manifest: d.manifest,
         }
     }
 }
@@ -68,6 +71,7 @@ impl CpOptions {
             retries: self.retries,
             sleep: self.sleep,
             diagnostic: self.diagnostic,
+            manifest: self.manifest,
         }
     }
 }
