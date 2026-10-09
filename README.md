@@ -5,6 +5,8 @@ an iPhone over Windows Portable Devices (WPD). It keeps the folder structure
 that File Explorer shows under `Internal Storage/DCIM`. It does not convert
 images, videos or metadata. It never writes to or deletes from the iPhone.
 
+Copying photos and videos from an iPhone with the built-in Windows tools (File Explorer over MTP/WPD, the Photos app) often freezes, stops part-way with errors such as "device unreachable" or "a device attached to the system is not functioning", or crashes. This happens most with large libraries. This tool exists to make that copy reliable. It talks to the phone through WPD in a separate worker process, retries failed transfers, skips files that are already copied, and shows progress and speed.
+
 ## Status
 
 Phase 1, 2 and 3 complete. Phase 4 (GUI) in progress: browsing, double-click
