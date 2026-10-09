@@ -1,10 +1,12 @@
 # Release workflow.
 #
 # Triggered by a pushed "v*" tag. The build job builds the Windows x64 and
-# ARM64 release binaries (CLI and GUI) on windows-latest and writes a
-# SHA256SUMS-<artifact>.txt file per target for both files. The publish job
-# then writes one SHA256SUMS.txt for all binaries and attaches all files to
-# one draft GitHub release. One job creates the release, so the matrix cells
+# ARM64 release binaries (CLI and GUI) on windows-latest and zips them with
+# their real file names, LICENSE and README.md into
+# win-iphone-dcim-windows-<x64|arm64>.zip. The GUI starts
+# win-iphone-dcim.exe from its own folder, so the names must not change.
+# The publish job then writes one SHA256SUMS.txt over the zips and attaches
+# the zips and the checksum file to one draft GitHub release. One job creates the release, so the matrix cells
 # cannot race to create two drafts. Steps live in `.github/actions/*`.
 #
 # No lint/test job here: the tagged commit is expected to have already
@@ -34,10 +36,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             artifact: win-iphone-dcim-windows-x64
-            gui-artifact: win-iphone-dcim-gui-windows-x64
           - target: aarch64-pc-windows-msvc
             artifact: win-iphone-dcim-windows-arm64
-            gui-artifact: win-iphone-dcim-gui-windows-arm64
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
@@ -53,23 +53,17 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Rename the binaries and write the checksums
+      - name: Zip the binaries
         shell: pwsh
         env:
           EXE: ${{ steps.build.outputs.exe }}
           GUI_EXE: ${{ steps.build.outputs.gui-exe }}
           ARTIFACT: ${{ matrix.artifact }}
-          GUI_ARTIFACT: ${{ matrix.gui-artifact }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $lines = @()
-          foreach ($pair in @(@($env:EXE, "$env:ARTIFACT.exe"), @($env:GUI_EXE, "$env:GUI_ARTIFACT.exe"))) {
-            $name = $pair[1]
-            Copy-Item -Path $pair[0] -Destination "dist/$name"
-            $hash = (Get-FileHash -Algorithm SHA256 -Path "dist/$name").Hash.ToLower()
-            $lines += "$hash  $name"
-          }
-          $lines | Out-File -FilePath "dist/SHA256SUMS-$env:ARTIFACT.txt" -Encoding ascii
+          $files = @($env:EXE, $env:GUI_EXE, 'LICENSE', 'README.md')
+          Compress-Archive -Path $files -DestinationPath "dist/$env:ARTIFACT.zip" -CompressionLevel Optimal
+          Get-Item "dist/$env:ARTIFACT.zip" | Format-List Name, Length
 
       - name: Upload the release files
         uses: actions/upload-artifact@v7
@@ -96,15 +90,15 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum -- *.exe > SHA256SUMS.txt
+          sha256sum -- *.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/*.exe
-            dist/SHA256SUMS*.txt
+            dist/*.zip
+            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
           draft: true
           generate_release_notes: true

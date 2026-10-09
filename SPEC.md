@@ -401,7 +401,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 ### Phase 3 — Release
 
 - [x] Run fmt/clippy/test/build on GitHub Actions `windows-latest`.
-- [x] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation.
+- [x] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation. The release ships one zip per target with the real EXE names (the GUI starts `win-iphone-dcim.exe` from its own folder) and one `SHA256SUMS.txt` over the zips.
 - [ ] Test on a minimum of two iPhone/iOS combinations. If only one combination is available, state the verification scope clearly.
 - [x] Add mock backend / fixture tests for use without an iPhone, behind the `fake-device` cargo feature, not in release builds. CI must not depend on hardware.
 

@@ -63,11 +63,10 @@ gh run download <run-id> -n win-iphone-dcim-windows-x64
 ```
 
 A pushed `v*` tag builds a draft GitHub release with
-`win-iphone-dcim-windows-x64.exe`, `win-iphone-dcim-gui-windows-x64.exe`,
-`win-iphone-dcim-windows-arm64.exe`, `win-iphone-dcim-gui-windows-arm64.exe`,
-a `SHA256SUMS-<name>.txt` file per target, and one `SHA256SUMS.txt` for all
-binaries. To use the GUI from a release, rename the CLI file to
-`win-iphone-dcim.exe` and keep it in the same folder as the GUI file (see
+`win-iphone-dcim-windows-x64.zip`, `win-iphone-dcim-windows-arm64.zip` and
+one `SHA256SUMS.txt` over the zip files. Each zip holds
+`win-iphone-dcim.exe`, `win-iphone-dcim-gui.exe`, `LICENSE` and `README.md`.
+Extract both programs into one folder; the GUI needs the CLI next to it (see
 [GUI](#gui)).
 No release is published yet.
 
