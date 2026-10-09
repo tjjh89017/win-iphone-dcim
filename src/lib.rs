@@ -9,6 +9,9 @@
 // unused. They are still compiled and unit-tested there.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+/// Git version from `git describe`, or the package version without git.
+pub const VERSION: &str = env!("WIN_IPHONE_DCIM_VERSION");
+
 pub mod backup;
 pub mod cli;
 pub mod cmd;

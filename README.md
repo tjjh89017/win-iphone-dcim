@@ -75,6 +75,8 @@ gh run download <run-id> -n win-iphone-dcim-windows-x64
 A pushed `v*` tag builds a draft GitHub release with the same zip files and
 `SHA256SUMS.txt`.
 
+The build embeds the output of `git describe --tags --always --dirty`, without the leading `v`, for example `0.1.0` or `0.1.0-3-gfd0b361`. `--version` and the GUI window title show it. Without git, the build uses the package version.
+
 ## Requirements
 
 - Windows 10 or 11.

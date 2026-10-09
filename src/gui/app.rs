@@ -57,7 +57,7 @@ pub fn run() -> ExitCode {
     let ole = dataobject::ole_init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("win-iphone-dcim")
+            .with_title(format!("win-iphone-dcim {}", crate::VERSION))
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 400.0]),
         renderer: eframe::Renderer::Glow,

@@ -13,7 +13,7 @@ use crate::supervisor::DEFAULT_TIMEOUT;
 #[derive(Debug, Parser)]
 #[command(
     name = "win-iphone-dcim",
-    version,
+    version = crate::VERSION,
     about = "Read-only iPhone DCIM access over Windows Portable Devices (WPD)",
     long_about = "win-iphone-dcim reads photos and videos from an iPhone over WPD. \
                   It never writes to or deletes from the device.\n\n\
