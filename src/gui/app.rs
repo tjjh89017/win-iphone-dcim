@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Button, Checkbox, Label, Layout, ProgressBar, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
@@ -15,17 +15,17 @@ use windows::Win32::System::Com::IDataObject;
 
 use super::cache;
 use super::chunks::Pending;
+use super::copyview::CopyTracker;
 use super::dataobject::{self, DataObject, PasteShared};
-use super::device::{
-    CopyProgress, CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector,
-};
+use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
 use super::dnd;
 use super::nav::{NavHistory, breadcrumbs};
 use super::selection::{Check, Entry, ListSelection, Tree, band_rows, sort_rows};
 use super::shell;
 use crate::backup::engine::Note;
 use crate::cmd::sort::SortKey;
-use crate::model::{DeviceInfo, LocalTime, human_size, human_speed};
+use crate::model::{DeviceInfo, LocalTime, human_size};
+use crate::speed::{SpeedMeter, format_eta, format_speed};
 use crate::supervisor::{DEFAULT_TIMEOUT, WorkerCommand};
 
 /// Lines kept in the log list.
@@ -185,7 +185,9 @@ struct App {
     status: String,
     log: Vec<String>,
     copying: bool,
-    copy: Option<CopyProgress>,
+    copy: CopyTracker,
+    /// The result line of the last cache download.
+    download_final: Option<String>,
     download: Option<Download>,
     /// Shared by the data objects and streams of Explorer pastes.
     paste: Option<Arc<PasteShared>>,
@@ -195,6 +197,12 @@ struct App {
     clipboard: Option<IDataObject>,
     /// What Explorer reads now.
     paste_status: Option<String>,
+    /// The paste stream that reads now: file number, files, bytes.
+    paste_live: Option<(usize, usize, u64)>,
+    /// Bytes of the files on the clipboard, 0 if unknown.
+    paste_total: u64,
+    paste_meter: SpeedMeter,
+    download_meter: SpeedMeter,
     /// The user asked to close while Explorer reads.
     close_warning: bool,
     close_anyway: bool,
@@ -224,12 +232,17 @@ impl App {
             status: String::new(),
             log: Vec::new(),
             copying: false,
-            copy: None,
+            copy: CopyTracker::new(Instant::now()),
+            download_final: None,
             download: None,
             paste: None,
             clip_wait: None,
             clipboard: None,
             paste_status: None,
+            paste_live: None,
+            paste_total: 0,
+            paste_meter: SpeedMeter::new(Instant::now()),
+            download_meter: SpeedMeter::new(Instant::now()),
             close_warning: false,
             close_anyway: false,
             release_pointer: false,
@@ -346,7 +359,12 @@ impl App {
                     }
                 }
             }
-            Reply::CopyProgress(p) => self.copy = Some(p),
+            Reply::CopyProgress(p) => {
+                self.copy.update(p, Instant::now());
+            }
+            Reply::CopyScan { files, bytes } => {
+                self.status = format!("Scanning... {files} files, {}", human_size(bytes));
+            }
             Reply::CopyNote(note, text) => {
                 // Copied files are in the counts; the log lists the rest.
                 if note != Note::Copy {
@@ -357,6 +375,7 @@ impl App {
                 self.copying = false;
                 match result {
                     Ok(s) => {
+                        self.copy.finish(&s, Instant::now());
                         self.status = format!(
                             "Copy {}: copied {}, skipped {}, failed {}, {}",
                             if s.cancelled { "cancelled" } else { "done" },
@@ -368,11 +387,19 @@ impl App {
                     }
                     Err(e) => self.error(format!("Copy failed: {e}")),
                 }
-                if let Some(p) = self.copy.as_mut() {
-                    p.current = None;
-                }
             }
             Reply::DownloadProgress { path, bytes, size } => {
+                self.download_final = None;
+                let now = Instant::now();
+                match &self.download {
+                    Some(d) if d.path == path && bytes >= d.bytes => {
+                        self.download_meter.add(bytes - d.bytes, now);
+                    }
+                    _ => {
+                        self.download_meter.reset(now);
+                        self.download_meter.add(bytes, now);
+                    }
+                }
                 self.download = Some(Download { path, bytes, size });
             }
             Reply::Downloaded {
@@ -380,7 +407,17 @@ impl App {
                 local,
                 reused,
             } => {
-                self.download = None;
+                let now = Instant::now();
+                self.download_final = Some(match self.download.take() {
+                    Some(d) => format!(
+                        "Downloaded {}  {}  elapsed {}  avg {}",
+                        file_name(&d.path),
+                        human_size(d.bytes),
+                        format_eta(self.download_meter.elapsed(now)),
+                        format_speed(self.download_meter.average(now))
+                    ),
+                    None => format!("Cached {}", file_name(&path)),
+                });
                 self.status = format!(
                     "Opening {}{}",
                     file_name(&path),
@@ -404,14 +441,27 @@ impl App {
             Reply::PasteProgress {
                 number,
                 files,
-                path,
                 bytes,
+                ..
             } => {
-                self.paste_status = Some(format!(
-                    "Explorer is reading {number} of {files}: {}  {}",
-                    file_name(&path),
-                    human_size(bytes)
-                ));
+                let now = Instant::now();
+                let delta = match self.paste_live {
+                    Some((n, _, b)) if n == number && bytes >= b => bytes - b,
+                    Some((n, ..)) if n != number && number != 1 => bytes,
+                    Some(_) => {
+                        // A new paste run starts at file 1 or re-reads a file.
+                        if number == 1 {
+                            self.paste_meter.reset(now);
+                        }
+                        bytes
+                    }
+                    None => {
+                        self.paste_meter.reset(now);
+                        bytes
+                    }
+                };
+                self.paste_meter.add(delta, now);
+                self.paste_live = Some((number, files, bytes));
             }
             Reply::PasteFileDone {
                 number,
@@ -420,6 +470,7 @@ impl App {
                 result,
             } => match result {
                 Ok(_) => {
+                    self.paste_live = None;
                     self.paste_status = (number < files)
                         .then(|| format!("Explorer is reading {number} of {files}..."));
                     if number == files {
@@ -427,6 +478,7 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    self.paste_live = None;
                     self.paste_status = None;
                     self.error(format!("Explorer paste of {path} failed: {e}"));
                 }
@@ -468,6 +520,12 @@ impl App {
         match dataobject::set_clipboard(&obj) {
             Ok(()) => {
                 self.status = format!("{} item(s) copied. Paste in File Explorer.", listing.len());
+                self.paste_total = listing
+                    .entries
+                    .iter()
+                    .flatten()
+                    .map(|f| f.size.unwrap_or(0))
+                    .sum();
                 self.clipboard = Some(obj);
             }
             Err(e) => self.error(format!("Cannot put the copy on the clipboard: {e}")),
@@ -495,6 +553,35 @@ impl App {
             Ok(false) => self.status = "Drag cancelled".into(),
             Err(e) => self.error(format!("Drag and drop failed: {e}")),
         }
+    }
+
+    /// The status of the running Explorer paste, with speed and bytes left.
+    fn paste_text(&self) -> Option<String> {
+        let Some((number, files, _)) = self.paste_live else {
+            return self.paste_status.clone();
+        };
+        let now = Instant::now();
+        let mut text = format!(
+            "Explorer is reading {number} of {files} \u{b7} {}",
+            format_speed(self.paste_meter.current(now))
+        );
+        if self.paste_total > 0 {
+            let left = self.paste_total.saturating_sub(self.paste_meter.total());
+            text.push_str(&format!(" \u{b7} {} left", human_size(left)));
+        }
+        Some(text)
+    }
+
+    /// `12.3 MiB/s` for a running cache download.
+    fn download_text(&self, d: &Download) -> String {
+        let now = Instant::now();
+        let mut text = format_speed(self.download_meter.current(now));
+        if let Some(size) = d.size
+            && let Some(eta) = self.download_meter.eta(size.saturating_sub(d.bytes), now)
+        {
+            text.push_str(&format!("  ETA {}", format_eta(eta)));
+        }
+        text
     }
 
     fn paste_busy(&self) -> bool {
@@ -607,7 +694,8 @@ impl App {
             force: self.force,
         });
         self.copying = true;
-        self.copy = None;
+        self.copy.start(Instant::now());
+        self.status = "Scanning...".into();
         self.status = format!("Copying to {}", dest.display());
         self.push_log(format!("[start] copy to {}", dest.display()));
     }
@@ -854,7 +942,11 @@ impl App {
             }
             ui.separator();
             ui.label(&self.status);
-            if let Some(p) = &self.paste_status {
+            if let Some(d) = &self.download {
+                ui.separator();
+                ui.label(self.download_text(d));
+            }
+            if let Some(p) = self.paste_text() {
                 ui.separator();
                 ui.label(p);
             }
@@ -1370,58 +1462,30 @@ impl App {
     }
 
     fn bottom_panel(&self, ui: &mut egui::Ui) {
+        if self.download.is_none()
+            && let Some(line) = &self.download_final
+        {
+            ui.add(ProgressBar::new(1.0).text(line));
+        }
         if let Some(d) = &self.download {
             let fraction = d
                 .size
                 .filter(|&s| s > 0)
                 .map_or(0.0, |s| d.bytes as f32 / s as f32);
             ui.add(ProgressBar::new(fraction).text(format!(
-                "Downloading {}  {} / {}",
+                "Downloading {}  {} / {}  {}",
                 file_name(&d.path),
                 human_size(d.bytes),
-                d.size.map(human_size).unwrap_or_else(|| "?".into())
+                d.size.map(human_size).unwrap_or_else(|| "?".into()),
+                self.download_text(d)
             )));
         }
-        let p = self.copy.clone().unwrap_or_default();
-        let current = match &p.current {
-            Some(c) => {
-                let elapsed = c.started.elapsed();
-                let speed = c.bytes as f64 / elapsed.as_secs_f64().max(0.001);
-                let eta = c
-                    .size
-                    .filter(|_| speed > 0.0)
-                    .map(|s| Duration::from_secs_f64(s.saturating_sub(c.bytes) as f64 / speed));
-                let fraction = c
-                    .size
-                    .filter(|&s| s > 0)
-                    .map_or(0.0, |s| c.bytes as f32 / s as f32);
-                ProgressBar::new(fraction).text(format!(
-                    "{}  {} / {}  {}  ETA {}",
-                    file_name(&c.source),
-                    human_size(c.bytes),
-                    c.size.map(human_size).unwrap_or_else(|| "?".into()),
-                    human_speed(c.bytes, elapsed),
-                    eta.map(format_eta).unwrap_or_else(|| "-".into())
-                ))
-            }
-            None => ProgressBar::new(0.0).text("No file in transfer"),
-        };
-        ui.add(current);
-        let more = if p.scanning && self.copying { "+" } else { "" };
-        let overall = if p.bytes_found > 0 {
-            p.bytes_done as f32 / p.bytes_found as f32
-        } else if p.files_found > 0 {
-            p.files_done as f32 / p.files_found as f32
-        } else {
-            0.0
-        };
-        ui.add(ProgressBar::new(overall).text(format!(
-            "Overall: files {}/{}{more}  {} / {}{more}",
-            p.files_done,
-            p.files_found,
-            human_size(p.bytes_done),
-            human_size(p.bytes_found)
-        )));
+        let now = Instant::now();
+        let (file_fraction, file_text) = self.copy.file_line(now);
+        ui.add(ProgressBar::new(file_fraction).text(file_text));
+        ui.add(
+            ProgressBar::new(self.copy.fraction()).text(self.copy.overall_text(self.copying, now)),
+        );
         ui.separator();
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
         egui::ScrollArea::vertical()
@@ -1575,9 +1639,4 @@ fn parent_path(path: &str) -> &str {
         Some(("", _)) | None => "/",
         Some((parent, _)) => parent,
     }
-}
-
-fn format_eta(d: Duration) -> String {
-    let s = d.as_secs();
-    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }

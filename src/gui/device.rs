@@ -115,6 +115,8 @@ pub struct CopyProgress {
     pub files_done: u64,
     pub bytes_found: u64,
     pub bytes_done: u64,
+    /// Bytes read from the device in this run, for the speed.
+    pub bytes_transferred: u64,
     /// The planner still lists folders, so the totals can grow.
     pub scanning: bool,
     pub current: Option<CurrentFile>,
@@ -134,6 +136,11 @@ pub enum Reply {
     Listed {
         path: String,
         result: std::result::Result<Vec<Entry>, String>,
+    },
+    /// The pre-scan of a copy found this much so far.
+    CopyScan {
+        files: u64,
+        bytes: u64,
     },
     CopyProgress(CopyProgress),
     CopyNote(Note, String),
@@ -475,8 +482,33 @@ impl DeviceThread {
             },
             ..CopyOptions::default()
         };
-        let mut sink = ChannelSink::new(&self.out, &self.cancel);
         let mut out = std::io::sink();
+        // Walk the set once for the totals, so the overall progress is exact.
+        let mut scan = ScanSink {
+            out: &self.out,
+            cancel: &self.cancel,
+            files: 0,
+            bytes: 0,
+            last: Instant::now(),
+        };
+        let plan = CopyOptions {
+            dry_run: true,
+            ..opts
+        };
+        let scanned = match selection {
+            Some(selection) => {
+                let view = SelectedFs::new(fs, selection);
+                engine::run(&view, &sources, dest, plan, &mut scan, &mut out)
+            }
+            None => engine::run(fs, &sources, dest, plan, &mut scan, &mut out),
+        }?;
+        if scanned.cancelled || self.cancel.load(Ordering::SeqCst) {
+            return Ok(CopySummary {
+                cancelled: true,
+                ..CopySummary::default()
+            });
+        }
+        let mut sink = ChannelSink::new(&self.out, &self.cancel, scan.files, scan.bytes);
         match selection {
             Some(selection) => {
                 let view = SelectedFs::new(fs, selection);
@@ -562,6 +594,33 @@ fn walk(
     Ok(())
 }
 
+/// Counts the files that a dry run plans and reports them as `CopyScan`.
+struct ScanSink<'a> {
+    out: &'a Out,
+    cancel: &'a AtomicBool,
+    files: u64,
+    bytes: u64,
+    last: Instant,
+}
+
+impl ProgressSink for ScanSink<'_> {
+    fn found(&mut self, size: Option<u64>) {
+        self.files += 1;
+        self.bytes += size.unwrap_or(0);
+        if self.last.elapsed() >= PROGRESS_INTERVAL {
+            self.last = Instant::now();
+            self.out.send(Reply::CopyScan {
+                files: self.files,
+                bytes: self.bytes,
+            });
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
 /// Engine progress as replies, at most one progress reply per interval.
 struct ChannelSink<'a> {
     out: &'a Out,
@@ -571,12 +630,14 @@ struct ChannelSink<'a> {
 }
 
 impl<'a> ChannelSink<'a> {
-    fn new(out: &'a Out, cancel: &'a AtomicBool) -> Self {
+    /// The totals come from the pre-scan and stay fixed.
+    fn new(out: &'a Out, cancel: &'a AtomicBool, files: u64, bytes: u64) -> Self {
         Self {
             out,
             cancel,
             progress: CopyProgress {
-                scanning: true,
+                files_found: files,
+                bytes_found: bytes,
                 ..CopyProgress::default()
             },
             last: Instant::now(),
@@ -592,10 +653,8 @@ impl<'a> ChannelSink<'a> {
 }
 
 impl ProgressSink for ChannelSink<'_> {
-    fn found(&mut self, size: Option<u64>) {
-        self.progress.files_found += 1;
-        self.progress.bytes_found += size.unwrap_or(0);
-        self.push(false);
+    fn begin(&mut self) {
+        self.push(true);
     }
 
     fn settled(&mut self, size: Option<u64>) {
@@ -615,6 +674,7 @@ impl ProgressSink for ChannelSink<'_> {
     }
 
     fn bytes(&mut self, n: u64) {
+        self.progress.bytes_transferred += n;
         if let Some(c) = self.progress.current.as_mut() {
             c.bytes += n;
         }
@@ -634,11 +694,6 @@ impl ProgressSink for ChannelSink<'_> {
             self.progress.files_done += 1;
             self.progress.bytes_done += c.size.unwrap_or(c.bytes);
         }
-        self.push(true);
-    }
-
-    fn scan_done(&mut self) {
-        self.progress.scanning = false;
         self.push(true);
     }
 
@@ -776,6 +831,15 @@ mod tests {
         let p = last_progress.unwrap();
         assert_eq!((p.files_found, p.files_done, p.scanning), (2, 2, false));
         assert_eq!(p.bytes_done, 2048 + 6);
+        // The totals come from the pre-scan, before the first file starts.
+        let first = replies
+            .iter()
+            .find_map(|r| match r {
+                Reply::CopyProgress(p) => Some(p.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((first.files_found, first.bytes_found), (2, 2048 + 6));
 
         // A second copy skips the verified files.
         h.send(Request::Copy {

@@ -157,8 +157,9 @@ Commands:
     the hash. Before a skip it hashes the local file again and skips only if
     the hash matches.
   - On a terminal, stderr shows an overall line (files, bytes, elapsed,
-    average speed) and a bar for the current file (bytes, percent, MiB/s,
-    ETA). The totals grow while folders are listed. Without a terminal, or
+    current and average speed, ETA once the listing is done) and a bar for
+    the current file (bytes, percent, current MiB/s over the last 3 s, ETA).
+    The totals grow while folders are listed. Without a terminal, or
     with `--log-format json`, progress goes to the log as events.
   - At the end, `cp` prints
     `[done] copied=N skipped=N exists=N failed=N` with the total bytes and
@@ -240,8 +241,14 @@ The window:
   Alt+Right = Forward, Alt+Up or Backspace = Up, mouse side buttons = Back
   and Forward, Enter opens the one selected row, Ctrl+A selects all rows in the
   folder, Ctrl+Shift+A or Escape deselects all.
-- Bottom: the progress of the current file (speed and ETA), the overall
-  progress, and a log of skip, retry and error lines.
+- Bottom: the progress of the current file (its current speed and ETA; it
+  stays on the last file between files), the overall progress, and a log of
+  skip, retry and error lines. A copy first scans the selected set (status
+  "Scanning... N files, X"; Cancel stops it), so the overall bar is a true
+  percent of the bytes, with files and bytes done/total, current and average
+  speed, elapsed time and ETA. The final overall line stays until the next
+  run. A double-click download and an Explorer paste show their speed and ETA
+  in the same way.
 
 Right-click menus:
 
