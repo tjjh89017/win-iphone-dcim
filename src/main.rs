@@ -5,6 +5,7 @@
 // unused. They are still compiled and unit-tested there.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod backup;
 mod cli;
 mod cmd;
 mod device_fs;
@@ -12,18 +13,24 @@ mod devpath;
 mod error;
 mod model;
 mod paths;
+mod progress;
 mod wpd;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, LogFormat};
-use crate::cmd::{cp::CpOptions, ls::LsOptions, sort::SortKey};
+use crate::cli::{Cli, Command, LogFormat, VerifyMode};
+use crate::cmd::{
+    cp::{CpOptions, OnExists},
+    ls::LsOptions,
+    sort::SortKey,
+};
 use crate::devpath::DevicePath;
 use crate::error::{Error, exit};
+use crate::progress::ProgressMode;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -51,7 +58,7 @@ fn init_logging(format: LogFormat) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+        .with_writer(progress::log_writer);
     match format {
         LogFormat::Text => builder.with_target(false).init(),
         LogFormat::Json => builder.json().init(),
@@ -108,14 +115,36 @@ fn run(cli: &Cli) -> Result<usize, Error> {
         }
         Command::Cp {
             recursive,
+            no_clobber,
+            force,
+            preserve,
+            archive,
             dry_run,
+            verify,
             sources,
             dest,
         } => {
+            if *verify == Some(VerifyMode::LocalHash) {
+                return Err(Error::NotImplemented("--verify local-hash"));
+            }
             let fs = wpd::open(cli.device)?;
+            let progress = if std::io::stderr().is_terminal() && cli.log_format == LogFormat::Text {
+                ProgressMode::Bar
+            } else {
+                ProgressMode::Events
+            };
             let opts = CpOptions {
-                recursive: *recursive,
+                recursive: *recursive || *archive,
+                preserve: *preserve || *archive,
                 dry_run: *dry_run,
+                on_exists: if *force {
+                    OnExists::Overwrite
+                } else if *no_clobber {
+                    OnExists::SkipQuiet
+                } else {
+                    OnExists::SkipWarn
+                },
+                progress,
             };
             cmd::cp::run(fs.as_ref(), sources, dest, opts, &mut out)?
         }

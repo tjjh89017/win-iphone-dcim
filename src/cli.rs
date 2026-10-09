@@ -37,6 +37,12 @@ pub enum LogFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum VerifyMode {
+    Size,
+    LocalHash,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// List the WPD devices that Windows can see.
@@ -96,21 +102,44 @@ pub enum Command {
         path: Option<DevicePath>,
     },
 
-    /// Copy device files to a local path. Never overwrites a local file.
+    /// Copy device files and folders to a local path, like Unix cp and rsync.
     ///
-    /// If DEST is an existing folder, each file goes into it with its original
-    /// file name. If DEST does not exist and there is one SRC, DEST is the new
-    /// file. With two or more SRC, DEST must be an existing folder.
+    /// If DEST is an existing folder, each SRC goes into it with its original
+    /// name. `SRC/` with a trailing slash copies the folder contents only.
+    /// If DEST does not exist and there is one SRC, DEST is the new file or
+    /// folder. With two or more SRC, DEST must be an existing folder. An
+    /// existing local file is skipped with a warning unless -f is given.
     Cp {
-        /// Copy folders recursively. Not implemented yet.
+        /// Copy folders recursively. A folder SRC needs this flag.
         #[arg(short = 'r')]
         recursive: bool,
 
-        /// Print the copy plan only.
+        /// Skip every existing target file silently.
+        #[arg(short = 'n', long = "no-clobber", conflicts_with = "force")]
+        no_clobber: bool,
+
+        /// Replace an existing target file. The new data goes to a `.part`
+        /// file first and replaces the target only when it is complete.
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Preserve the device modified and created times.
+        #[arg(short = 'p')]
+        preserve: bool,
+
+        /// Archive mode: same as -r -p.
+        #[arg(short = 'a')]
+        archive: bool,
+
+        /// Print the copy plan only. Write nothing.
         #[arg(long)]
         dry_run: bool,
 
-        /// Device file paths. A trailing `/` is kept for the future `-r` rules.
+        /// Verification mode. Only `size` is available until Phase 2.
+        #[arg(long, value_enum, value_name = "MODE")]
+        verify: Option<VerifyMode>,
+
+        /// Device paths. A trailing `/` copies the folder contents only.
         #[arg(value_name = "SRC", required = true, num_args = 1..)]
         sources: Vec<DevicePath>,
 
@@ -234,6 +263,7 @@ mod tests {
             dry_run,
             sources,
             dest,
+            ..
         } = cli.command
         else {
             panic!("not cp");
@@ -243,6 +273,39 @@ mod tests {
         assert!(sources[0].trailing_slash());
         assert!(!sources[1].trailing_slash());
         assert_eq!(dest, PathBuf::from("D:\\iPhoneBackup"));
+    }
+
+    #[test]
+    fn cp_conflict_and_archive_flags() {
+        let cli = parse(&["cp", "-a", "-f", "/a", "D:\\x"]).unwrap();
+        let Command::Cp {
+            archive,
+            force,
+            no_clobber,
+            ..
+        } = cli.command
+        else {
+            panic!("not cp");
+        };
+        assert!(archive && force && !no_clobber);
+        assert!(parse(&["cp", "-n", "/a", "x"]).is_ok());
+        assert!(parse(&["cp", "--no-clobber", "-p", "/a", "x"]).is_ok());
+        let err = parse(&["cp", "-f", "-n", "/a", "x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cp_verify_values() {
+        let cli = parse(&["cp", "--verify", "local-hash", "/a", "x"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Cp {
+                verify: Some(VerifyMode::LocalHash),
+                ..
+            }
+        ));
+        assert!(parse(&["cp", "--verify", "size", "/a", "x"]).is_ok());
+        assert!(parse(&["cp", "--verify", "md5", "/a", "x"]).is_err());
     }
 
     #[test]
