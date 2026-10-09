@@ -2,7 +2,7 @@
 
 ## Project
 
-A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an iPhone over WPD. See SPEC.md.
+A Rust CLI and GUI for Windows 10/11 x64 that copies photos and videos from an iPhone over WPD. See docs/SPEC.md.
 
 - `src/lib.rs` holds the modules. `src/main.rs` is the CLI. `src/bin/gui.rs` is the GUI (`win-iphone-dcim-gui`).
 

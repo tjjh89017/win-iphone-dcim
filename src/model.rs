@@ -216,7 +216,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// What `cp` does with one planned file after it checks the target and the
-/// manifest (SPEC.md section 7, incremental rules).
+/// manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncDecision {
     /// No local file at the target. Copy it.

@@ -1,4 +1,4 @@
-//! Local cache for files that the GUI opens (SPEC.md section 10, Phase 4).
+//! Local cache for files that the GUI opens.
 //!
 //! Layout: `<base>\<device key>\<device path>`, with the original folder
 //! and file names. `<base>` is `cache_dir` from the config, else a

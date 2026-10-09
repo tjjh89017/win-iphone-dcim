@@ -1,4 +1,4 @@
-//! JSONL manifest of committed files (SPEC.md sections 5, 7 and 9).
+//! JSONL manifest of committed files.
 //!
 //! The manifest is `DEST/.win-iphone-dcim/manifest.jsonl`. Each committed
 //! file appends one JSON line. Each append is flushed and synced, so an

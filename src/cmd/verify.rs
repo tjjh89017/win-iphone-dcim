@@ -1,5 +1,5 @@
-//! `verify DEST`: check the local files against the manifest
-//! (SPEC.md section 5). It reads local files only and never opens a device.
+//! `verify DEST`: check the local files against the manifest.
+//! It reads local files only and never opens a device.
 
 use std::collections::BTreeSet;
 use std::io::{ErrorKind, Write};

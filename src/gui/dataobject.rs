@@ -1,5 +1,5 @@
 //! The `IDataObject` that File Explorer pastes from, and the `IStream` of
-//! each file (SPEC.md section 10, Phase 4). Windows only.
+//! each file Windows only.
 //!
 //! Threads: the data object lives on the UI thread, which is an OLE STA.
 //! Explorer calls it there through the message loop. Each stream lives in

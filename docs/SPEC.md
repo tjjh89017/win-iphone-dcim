@@ -118,7 +118,8 @@ win-iphone-dcim/
 ├── docker-compose.yml
 ├── AGENTS.md
 ├── README.md
-├── SPEC.md
+├── docs/
+│   └── SPEC.md
 ├── scripts/
 ├── .github/
 ├── src/

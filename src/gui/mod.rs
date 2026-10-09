@@ -1,4 +1,4 @@
-//! The GUI (SPEC.md section 10, Phase 4): browse the device tree, check
+//! The GUI: browse the device tree, check
 //! folders and files, copy them with the copy engine, and open a file with
 //! its default application from a local cache.
 //!

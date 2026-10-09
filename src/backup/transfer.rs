@@ -1,5 +1,4 @@
-//! Streamed file transfer: `.part` file, size check, atomic commit
-//! (SPEC.md section 7).
+//! Streamed file transfer: `.part` file, size check, atomic commit.
 //!
 //! The data goes to a unique `<final>.<random>.part` file in the target
 //! folder. Only a complete file with the expected size gets the final name.

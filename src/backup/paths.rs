@@ -1,4 +1,4 @@
-//! Windows file name rules for names that come from the device (SPEC.md section 9).
+//! Windows file name rules for names that come from the device.
 //!
 //! A name that breaks a rule is an error. The tool never renames a file to
 //! make it fit.

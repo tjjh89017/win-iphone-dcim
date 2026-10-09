@@ -1,10 +1,10 @@
 //! Copy engine: copies device files and folders to a local path with the
-//! `cp` rules of SPEC.md section 5.
+//! `cp` rules.
 //!
 //! With `manifest`, a copy writes the JSONL manifest of the copy root and
-//! applies the incremental rules of SPEC.md section 7. Without it, a local
+//! applies the incremental rules. Without it, a local
 //! file of the same size is kept. A transient failure is retried
-//! with backoff (section 8). The engine reports progress to a
+//! with backoff. The engine reports progress to a
 //! `ProgressSink`: the CLI draws terminal bars, the GUI forwards events to
 //! its window.
 
@@ -384,7 +384,7 @@ impl Run<'_> {
         relative_path(self.manifest.as_ref()?.root(), target)
     }
 
-    /// Apply the incremental rules of SPEC.md section 7 to one file.
+    /// Apply the incremental rules to one file.
     fn decide(&self, source: &str, node: &Node, target: &Path) -> Result<SyncDecision> {
         let meta = match std::fs::symlink_metadata(target) {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(SyncDecision::Copy),

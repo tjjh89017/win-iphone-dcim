@@ -1,6 +1,6 @@
 //! Copy planner: turns `cp` sources and DEST into copy items, lazily.
 //!
-//! The planner applies the Unix `cp` and `rsync` rules of SPEC.md section 5.
+//! The planner applies the Unix `cp` and `rsync` rules.
 //! It lists one device folder only when the caller reaches it, so the whole
 //! tree is never held in memory.
 

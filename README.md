@@ -8,7 +8,7 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 ## Status
 
 Phase 1, 2 and 3 complete. Phase 4 (GUI) in progress: browsing, double-click
-open, in-app copy, and Explorer paste and drag-and-drop work. See [SPEC.md](SPEC.md) for the
+open, in-app copy, and Explorer paste and drag-and-drop work. See [docs/SPEC.md](docs/SPEC.md) for the
 full plan. Release v0.1.0 is published.
 
 Works now:
@@ -38,7 +38,7 @@ Works now:
 Status on real hardware as of 2026-10-09: the GUI starts on Windows x64 and
 lists a connected iPhone. The worker console window bug was found on real
 hardware and fixed. Nothing else is verified on real hardware: no WPD copy,
-no Explorer paste, no folder-name check (SPEC section 2), and no ARM64 test.
+no Explorer paste, no folder-name check, and no ARM64 test.
 All automated tests use the in-memory fake device, on Linux and on
 `windows-latest`. Use the [checklist](#testing-on-a-real-iphone) below for
 the next real-device run.

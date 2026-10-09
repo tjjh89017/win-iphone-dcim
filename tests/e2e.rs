@@ -129,7 +129,7 @@ fn default_copy_writes_no_manifest() {
     assert!(!tmp.path().join(".win-iphone-dcim").exists());
 }
 
-/// SPEC.md section 11, "WPD Read() hangs": the parent kills the worker
+/// WPD Read() hangs: the parent kills the worker
 /// after `--timeout`, prints a retry line, and the retry in a new worker
 /// completes the file.
 #[test]

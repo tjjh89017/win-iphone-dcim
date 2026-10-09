@@ -1,4 +1,4 @@
-//! `cp`: copy device files and folders to a local path (SPEC.md section 5).
+//! `cp`: copy device files and folders to a local path.
 //!
 //! The copy itself is `backup::engine`. This command adds the terminal
 //! progress display and the stdout lines.

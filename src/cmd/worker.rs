@@ -1,5 +1,5 @@
 //! Hidden `worker` subcommand: the child process that owns the WPD COM
-//! objects (SPEC.md section 8). The parent starts it as
+//! objects The parent starts it as
 //! `<exe> worker --data-pipe <handle>` and talks to it with the protocol in
 //! `ipc`.
 //!

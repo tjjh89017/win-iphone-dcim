@@ -1,4 +1,4 @@
-//! Parent side of the worker process (SPEC.md section 8).
+//! Parent side of the worker process.
 //!
 //! A WPD COM call can block in the driver, and no thread timeout can cancel
 //! it. So the COM objects live in a child process: `<exe> worker`. The

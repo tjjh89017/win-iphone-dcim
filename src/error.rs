@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::model::FailureKind;
 
-/// Exit codes per SPEC.md section 5.
+/// Exit codes.
 pub mod exit {
     pub const OK: i32 = 0;
     pub const FILE_FAILED: i32 = 1;
@@ -218,7 +218,7 @@ impl Error {
     /// True if a new attempt can succeed: the device is busy or gone for a
     /// moment, an I/O call timed out, a network (SMB) write failed, or the
     /// worker was restarted. Not found, unsafe names, collisions, a full disk
-    /// and access denied are permanent (SPEC.md section 8).
+    /// and access denied are permanent.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::DeviceUnavailable { .. } | Self::WorkerRestarted { .. } => true,

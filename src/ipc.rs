@@ -1,5 +1,4 @@
-//! Protocol between the parent process and the worker process (SPEC.md
-//! sections 4 and 8).
+//! Protocol between the parent process and the worker process.
 //!
 //! Control channel: one JSON object per line. The parent writes `Request`s
 //! to the worker's stdin. The worker writes `Response`s to its stdout. The
