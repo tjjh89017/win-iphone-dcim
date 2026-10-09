@@ -210,7 +210,7 @@ impl Run<'_> {
     fn open_manifest(&mut self, root: &Path) -> Result<()> {
         let mut manifest = Manifest::load(root)?;
         let counts = manifest.reconcile();
-        if manifest.len() > 0 {
+        if !manifest.is_empty() {
             tracing::info!(
                 "manifest {}: {} record(s), {} stale",
                 Manifest::path_for(root).display(),

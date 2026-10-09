@@ -13,7 +13,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, PipeReader, PipeWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -46,19 +46,54 @@ pub struct WorkerCommand {
     pub pipe_in_env: bool,
 }
 
+/// File name of the CLI program. It is also the worker program.
+pub const CLI_EXE_NAME: &str = if cfg!(windows) {
+    "win-iphone-dcim.exe"
+} else {
+    "win-iphone-dcim"
+};
+
 impl WorkerCommand {
-    /// `<this exe> worker --data-pipe <handle>`.
-    pub fn current_exe() -> Result<Self> {
-        let program = std::env::current_exe().map_err(|source| Error::Io {
-            context: "find the program file to start the worker".into(),
-            source,
-        })?;
-        Ok(Self {
+    /// `<program> worker --data-pipe <handle>`.
+    pub fn program(program: PathBuf) -> Self {
+        Self {
             program,
             args: vec!["worker".into()],
             envs: Vec::new(),
             pipe_in_env: false,
-        })
+        }
+    }
+
+    /// `<this exe> worker --data-pipe <handle>`.
+    pub fn current_exe() -> Result<Self> {
+        Ok(Self::program(this_exe()?))
+    }
+
+    /// The CLI program in the folder of this program, as the worker. The
+    /// GUI uses it: the GUI program has no `worker` subcommand.
+    pub fn cli_next_to_current_exe() -> Result<Self> {
+        Ok(Self::program(cli_next_to(&this_exe()?)?))
+    }
+}
+
+fn this_exe() -> Result<PathBuf> {
+    std::env::current_exe().map_err(|source| Error::Io {
+        context: "find the program file to start the worker".into(),
+        source,
+    })
+}
+
+/// The path of the CLI program in the folder of `exe`. An error if no such
+/// file exists.
+pub fn cli_next_to(exe: &Path) -> Result<PathBuf> {
+    let path = exe
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(CLI_EXE_NAME);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(Error::WorkerMissing(path))
     }
 }
 
@@ -764,6 +799,22 @@ mod tests {
             envs: vec![(WORKER_MODE_ENV.into(), mode.into())],
             pipe_in_env: true,
         }
+    }
+
+    #[test]
+    fn worker_is_the_cli_next_to_the_gui() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gui = tmp.path().join("win-iphone-dcim-gui.exe");
+        let err = cli_next_to(&gui).unwrap_err();
+        match &err {
+            Error::WorkerMissing(path) => assert_eq!(path, &tmp.path().join(CLI_EXE_NAME)),
+            other => panic!("unexpected: {other}"),
+        }
+        assert!(err.to_string().contains("same folder"), "{err}");
+        std::fs::write(tmp.path().join(CLI_EXE_NAME), b"").unwrap();
+        assert_eq!(cli_next_to(&gui).unwrap(), tmp.path().join(CLI_EXE_NAME));
+        let cmd = WorkerCommand::program(tmp.path().join(CLI_EXE_NAME));
+        assert_eq!(cmd.args, [OsString::from("worker")]);
     }
 
     fn remote(mode: &str, timeout: Duration) -> RemoteFs {

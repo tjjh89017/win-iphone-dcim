@@ -139,6 +139,12 @@ pub enum Error {
     #[error("{context}: the device worker was restarted ({reason})")]
     WorkerRestarted { context: String, reason: String },
 
+    #[error(
+        "the device worker program is missing: {}; keep win-iphone-dcim.exe in the same folder as the GUI",
+        .0.display()
+    )]
+    WorkerMissing(PathBuf),
+
     #[error("WPD is only available on Windows; this build runs on an unsupported platform")]
     #[cfg_attr(windows, allow(dead_code))]
     UnsupportedPlatform,
@@ -192,9 +198,10 @@ impl Error {
             | Self::OutputExists(_)
             | Self::Io { .. }
             | Self::SizeMismatch { .. } => exit::FILE_FAILED,
-            Self::Wpd { .. } | Self::WorkerRestarted { .. } | Self::UnsupportedPlatform => {
-                exit::INTERNAL
-            }
+            Self::Wpd { .. }
+            | Self::WorkerRestarted { .. }
+            | Self::WorkerMissing(_)
+            | Self::UnsupportedPlatform => exit::INTERNAL,
         }
     }
 }

@@ -199,6 +199,10 @@ impl Manifest {
         &self.root
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> usize {
         self.index.len()
     }

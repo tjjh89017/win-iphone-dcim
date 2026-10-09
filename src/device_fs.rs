@@ -84,7 +84,16 @@ pub fn open_device_fs(
         }
         return crate::wpd::open(selection);
     }
-    let supervisor = Supervisor::start(WorkerCommand::current_exe()?, timeout, selection)?;
+    open_remote(WorkerCommand::current_exe()?, selection, timeout)
+}
+
+/// Open the device in a worker process that `worker` starts.
+pub fn open_remote(
+    worker: WorkerCommand,
+    selection: Option<usize>,
+    timeout: Duration,
+) -> Result<Box<dyn DeviceFs>> {
+    let supervisor = Supervisor::start(worker, timeout, selection)?;
     Ok(Box::new(RemoteFs::new(supervisor)))
 }
 
@@ -335,6 +344,12 @@ pub mod fake {
                 .iter()
                 .position(|(n, _, _)| n.id == node.id)
                 .unwrap()
+        }
+    }
+
+    impl Default for FakeFs {
+        fn default() -> Self {
+            Self::new()
         }
     }
 

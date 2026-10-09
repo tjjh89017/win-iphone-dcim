@@ -1,22 +1,5 @@
-//! win-iphone-dcim: read-only iPhone DCIM access over Windows Portable Devices.
-
-// Off Windows the WPD backend is a stub, so the portable helpers that only
-// it calls (HRESULT mapping, device selection, date and buffer helpers) look
-// unused. They are still compiled and unit-tested there.
-#![cfg_attr(not(windows), allow(dead_code))]
-
-mod backup;
-mod cli;
-mod cmd;
-mod device_fs;
-mod devpath;
-mod error;
-mod ipc;
-mod model;
-mod paths;
-mod progress;
-mod supervisor;
-mod wpd;
+//! win-iphone-dcim: the CLI entry point. The hidden `worker` subcommand is
+//! the device worker process for the CLI and the GUI.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
@@ -24,16 +7,17 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, LogFormat, VerifyMode};
-use crate::cmd::{
+use win_iphone_dcim::cli::{Cli, Command, LogFormat, VerifyMode};
+use win_iphone_dcim::cmd::{
     cp::{CpOptions, OnExists},
     ls::LsOptions,
     sort::SortKey,
     verify::VerifyOptions,
 };
-use crate::devpath::DevicePath;
-use crate::error::{Error, exit};
-use crate::progress::ProgressMode;
+use win_iphone_dcim::devpath::DevicePath;
+use win_iphone_dcim::error::{self, Error, exit};
+use win_iphone_dcim::progress::{self, ProgressMode};
+use win_iphone_dcim::{cmd, device_fs};
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
