@@ -6,6 +6,10 @@ inputs:
     description: 'Comma-separated rustup components to install, for example rustfmt, clippy'
     required: false
     default: ''
+  target:
+    description: 'Optional rustup target to install, for example aarch64-pc-windows-msvc'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -13,5 +17,8 @@ runs:
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: ${{ inputs.components }}
+        targets: ${{ inputs.target }}
 
     - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.target }}

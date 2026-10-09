@@ -1,11 +1,12 @@
 # CI workflow.
 #
 # Checks format and clippy, runs the unit tests, then builds the Windows x64
-# release binary and uploads it as an artifact. Steps live in
+# and ARM64 release binaries and uploads them as artifacts. Steps live in
 # `.github/actions/*`.
 #
-# Every job runs on windows-latest: the binary uses Windows Portable Devices
-# and targets x86_64-pc-windows-msvc. Tests that need WPD or a real iPhone are
+# Every job runs on windows-latest: the binary uses Windows Portable Devices.
+# Lint and test run on x86_64-pc-windows-msvc. The build job also
+# cross-compiles aarch64-pc-windows-msvc with the MSVC toolchain on the runner. Tests that need WPD or a real iPhone are
 # manual and do not run here.
 #
 # The lint, test, and build jobs run in parallel. Build runs even when lint or
@@ -61,22 +62,35 @@ jobs:
         uses: ./.github/actions/test
 
   build:
-    name: Build
+    name: Build (${{ matrix.artifact }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            artifact: win-iphone-dcim-windows-x64
+          - target: aarch64-pc-windows-msvc
+            artifact: win-iphone-dcim-windows-arm64
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
+        with:
+          target: ${{ matrix.target }}
 
       - name: Build
+        id: build
         uses: ./.github/actions/build
+        with:
+          target: ${{ matrix.target }}
 
       - name: Upload the release binary
         uses: actions/upload-artifact@v7
         with:
-          name: windows-x64
-          path: target/release/*.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ steps.build.outputs.exe }}
           retention-days: 7
           if-no-files-found: error

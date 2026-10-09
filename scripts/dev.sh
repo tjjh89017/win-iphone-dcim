@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: scripts/dev.sh <cargo args>
-# Runs cargo inside the dev container. With no args, cross-builds the release binary.
+# Runs cargo inside the dev container. With no args, cross-builds the x64 release binary.
+# ARM64 build: scripts/dev.sh xwin build --release --target aarch64-pc-windows-msvc
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

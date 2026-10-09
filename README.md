@@ -60,12 +60,14 @@ Do not run cargo on the host. Use the Docker wrapper:
 
 ```sh
 scripts/dev.sh                     # release build: target/x86_64-pc-windows-msvc/release/win-iphone-dcim.exe
+scripts/dev.sh xwin build --release --target aarch64-pc-windows-msvc   # ARM64 release build
 scripts/dev.sh test                # portable unit tests (Linux container)
 scripts/dev.sh xwin clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 ```
 
 The `target` directory is a Docker volume. GitHub Actions on `windows-latest`
-is the authoritative build.
+is the authoritative build. Each run uploads two artifacts:
+`win-iphone-dcim-windows-x64` and `win-iphone-dcim-windows-arm64`. The ARM64 binary is built but not tested on hardware.
 
 ## License
 

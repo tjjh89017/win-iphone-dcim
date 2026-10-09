@@ -38,7 +38,7 @@ The key point is to **preserve the logical folders that WPD exposes**. The tool 
 - Sync incrementally. On a new run, skip the files that are already verified.
 - Retry a failed file individually. Show clear transfer progress and a failure report.
 - Keep the main process in control if a WPD COM call blocks permanently. The main process must continue to report status. The main process must be able to terminate the worker.
-- Support only Windows x64 in the first version. Keep an abstract interface for a future AFC backend.
+- Support Windows x64 in the first version. Also build a Windows ARM64 binary, but do not test it on hardware. Keep an abstract interface for a future AFC backend.
 
 ### Non-goals (v1)
 
@@ -376,7 +376,7 @@ Parent supervisor (CLI, owns log/manifest coordinator)
 ### Phase 3 — Release
 
 - [ ] Run fmt/clippy/test/build on GitHub Actions `windows-latest`.
-- [ ] Produce the `x86_64-pc-windows-msvc` Release EXE, a checksum, and basic usage documentation.
+- [ ] Produce the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` Release EXEs, a checksum for each, and basic usage documentation.
 - [ ] Test on a minimum of two iPhone/iOS combinations. If only one combination is available, state the verification scope clearly.
 - [ ] Add mock backend / fixture tests for use without an iPhone. CI must not depend on hardware.
 

@@ -1,9 +1,25 @@
 name: 'Build'
-description: 'Build the Windows x64 release binary into target/release.'
+description: 'Build the Windows release binary for one target into target/<target>/release.'
+
+inputs:
+  target:
+    description: 'Rust target triple, for example x86_64-pc-windows-msvc or aarch64-pc-windows-msvc'
+    required: true
+
+outputs:
+  exe:
+    description: 'Path of the built release binary'
+    value: ${{ steps.build.outputs.exe }}
 
 runs:
   using: 'composite'
   steps:
     - name: Build the release binary
+      id: build
       shell: pwsh
-      run: cargo build --release --locked
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        cargo build --release --locked --target $env:TARGET
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "exe=target/$env:TARGET/release/win-iphone-dcim.exe" >> $env:GITHUB_OUTPUT
