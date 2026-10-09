@@ -143,6 +143,8 @@ enum Action {
     Open(String),
     OpenCacheFolder(String),
     CopyTo(Vec<String>),
+    /// Copy these paths into the destination, without a dialog.
+    CopyToDest(Vec<String>),
     Properties(String),
     ExpandAll(String),
     CollapseAll(String),
@@ -949,7 +951,11 @@ impl App {
                 },
                 Action::CopyTo(paths) => {
                     if !paths.is_empty() && !self.copying {
-                        let dir = rfd::FileDialog::new().pick_folder();
+                        let mut dialog = rfd::FileDialog::new();
+                        if let Some(dest) = &self.dest {
+                            dialog = dialog.set_directory(dest);
+                        }
+                        let dir = dialog.pick_folder();
                         // The slow-frame check measures the work after the
                         // dialog, not the time the user spent in it.
                         tracing::debug!(
@@ -958,8 +964,17 @@ impl App {
                         );
                         self.frame_start = Instant::now();
                         if let Some(dir) = dir {
+                            self.dest = Some(dir.clone());
                             self.start_copy(CopySet::Paths(paths), dir);
                         }
+                    }
+                }
+                Action::CopyToDest(paths) => {
+                    if !paths.is_empty()
+                        && !self.copying
+                        && let Some(dest) = self.dest.clone()
+                    {
+                        self.start_copy(CopySet::Paths(paths), dest);
                     }
                 }
                 Action::Properties(path) => {
@@ -1125,6 +1140,9 @@ impl App {
                     .clicked()
                 {
                     actions.push(Action::CopyTo(self.menu_targets()));
+                }
+                if self.copy_to_dest_button(ui, state).clicked() {
+                    actions.push(Action::CopyToDest(self.menu_targets()));
                 }
                 if ui
                     .add_enabled(state.cancel(), Button::new("Cancel copy"))
@@ -1609,7 +1627,30 @@ impl App {
         }
     }
 
+    /// "Copy to <destination>", with the full path in the tooltip.
+    fn copy_to_dest_button(&self, ui: &mut egui::Ui, state: MenuState) -> egui::Response {
+        let (label, hover) = match &self.dest {
+            Some(dest) => (menu::copy_to_dest_label(dest), dest.display().to_string()),
+            None => (
+                "Copy to destination".into(),
+                "Set a destination first".into(),
+            ),
+        };
+        ui.add_enabled(state.copy_to_dest(), Button::new(label))
+            .on_hover_text(hover)
+    }
+
     fn copy_items(&self, ui: &mut egui::Ui, targets: &[String], actions: &mut Vec<Action>) {
+        let state = MenuState {
+            has_dest: self.dest.is_some(),
+            highlighted: targets.len(),
+            copying: self.copying,
+            ..Default::default()
+        };
+        if self.copy_to_dest_button(ui, state).clicked() {
+            actions.push(Action::CopyToDest(targets.to_vec()));
+            ui.close();
+        }
         if ui
             .add_enabled(!self.copying, Button::new("Copy to..."))
             .on_hover_text("Pick a folder, then copy like cp -r -p")

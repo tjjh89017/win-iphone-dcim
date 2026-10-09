@@ -33,6 +33,12 @@ impl MenuState {
         !self.copying && self.has_targets()
     }
 
+    /// "Copy to <destination>": the highlighted rows, or the checked items,
+    /// into the destination without a dialog.
+    pub fn copy_to_dest(&self) -> bool {
+        !self.copying && self.has_dest && self.has_targets()
+    }
+
     /// "Copy (paste in Explorer)": the highlighted rows, or the checked items.
     pub fn explorer_copy(&self) -> bool {
         self.explorer && self.has_targets()
@@ -74,6 +80,16 @@ impl MenuState {
     fn has_targets(&self) -> bool {
         self.highlighted > 0 || self.checked
     }
+}
+
+/// The text of the "Copy to <destination>" item: the last component of the
+/// destination, or the whole path for a drive root.
+pub fn copy_to_dest_label(dest: &std::path::Path) -> String {
+    let name = dest.file_name().map_or_else(
+        || dest.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    format!("Copy to {name}")
 }
 
 /// The year in the copyright line of LICENSE.

@@ -45,6 +45,7 @@ fn copies_are_disabled_while_a_copy_runs() {
     s.copying = true;
     assert!(!s.copy_to_folder());
     assert!(!s.copy_to());
+    assert!(!s.copy_to_dest());
     assert!(s.cancel());
     // Explorer reads through its own streams, not the copy engine.
     assert!(s.explorer_copy());
@@ -113,4 +114,27 @@ fn about_lines_name_the_license_and_the_holder() {
         license_name(env!("CARGO_PKG_LICENSE")),
         "Apache License 2.0"
     );
+}
+
+#[test]
+fn copy_to_dest_needs_destination_and_targets() {
+    let mut s = open();
+    s.has_dest = true;
+    assert!(!s.copy_to_dest());
+    s.highlighted = 2;
+    assert!(s.copy_to_dest());
+    s.highlighted = 0;
+    s.checked = true;
+    assert!(s.copy_to_dest());
+    s.has_dest = false;
+    assert!(!s.copy_to_dest());
+}
+
+#[test]
+fn copy_to_dest_label_uses_the_last_component() {
+    assert_eq!(
+        copy_to_dest_label(std::path::Path::new("photos/2026")),
+        "Copy to 2026"
+    );
+    assert_eq!(copy_to_dest_label(std::path::Path::new("/")), "Copy to /");
 }
