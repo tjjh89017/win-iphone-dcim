@@ -217,7 +217,7 @@ an error and cannot open a device.
 The window:
 
 - Top bar: the device list, Refresh, the destination folder (Destination...),
-  "Overwrite existing (--force)", Copy (Cancel while a copy runs), Clear
+  "Overwrite existing (--force)", "Copy to folder" (Cancel while a copy runs), Clear
   cache, and a status text. Refresh lists the devices again and reloads the
   tree. With one device, the GUI opens it at start.
 - Left: the device tree from `/`. A folder is listed when you open it. Each
@@ -238,7 +238,10 @@ The window:
   the drag starts, the rows add to the selection. The list scrolls when you
   drag past its top or bottom edge. A drag that starts on a selected row
   drags the selected items to File Explorer (see below). Ctrl+C copies the
-  selected rows for a paste in File Explorer.
+  selected rows for a paste in File Explorer, or the checked items when no
+  row is selected. A right-click on a row that is not selected selects only
+  that row, like File Explorer; a right-click on a selected row keeps the
+  selection.
 - Above the file list: Back (←), Forward (→), Up (↑) and the path bar
   (`/ › Internal Storage › DCIM › 202601_a`). Click a path segment to go to
   that folder. Entering a folder (double-click, a click in the tree, Open,
@@ -265,8 +268,8 @@ Right-click menus:
 
 | Where | Items |
 | --- | --- |
-| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (for Explorer paste), Check, Uncheck, Properties |
-| A folder (list or tree) | Open, Copy to..., Copy (for Explorer paste), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
+| A file (list or tree) | Open, Open cache folder (only when the file is cached; Explorer selects it), Copy to..., Copy (paste in Explorer), Check, Uncheck, Properties |
+| A folder (list or tree) | Open, Copy to..., Copy (paste in Explorer), Check all beneath, Uncheck all beneath, Expand all, Collapse all, Properties |
 | Empty space in the list | Refresh, Select all, Deselect all |
 
 In the list, a menu on a selected row acts on all selected rows. Open is
@@ -274,7 +277,7 @@ enabled only for one item. Properties shows the name, the device path, and
 for a file the size, dates, WPD content type and whether it is cached; for a
 folder the number of direct subfolders and files.
 
-Copy (top bar) copies the checked items into the destination folder, like
+"Copy to folder" (top bar) copies the checked items into the destination folder, like
 `cp -r -p` with the default warn-and-skip rule (or `--force` with the
 checkbox). The copy starts at the deepest folder that holds all checked
 items and copies only the checked items below it. For example, checked
@@ -297,9 +300,10 @@ for the file type.
 
 ### Copy and paste or drag and drop to File Explorer
 
-"Copy (for Explorer paste)" in a right-click menu, or Ctrl+C in the file
-list, puts the selected items on the clipboard. Folders include everything
-below them. The status text shows "N items copied. Paste in File Explorer."
+"Copy (paste in Explorer)" in a right-click menu, or Ctrl+C in the file
+list, puts the selected items on the clipboard. With no selected row, Ctrl+C
+takes the checked items. With neither, the status text shows "Select or
+check items to copy". Folders include everything below them. The status text shows "N items copied. Paste in File Explorer."
 when the folders are listed. Then paste in any File Explorer folder.
 
 You can also drag selected rows from the file list and drop them on a File
@@ -317,8 +321,8 @@ Limits of this mode:
   ("Close anyway"); Explorer then reports an error for the remaining files.
 - The speed is the same as the CLI and the in-app copy, not faster.
 - Explorer decides replace or skip. There is no manifest, no verification
-  and no incremental skip of verified files. Use Copy or "Copy to..." for
-  those.
+  and no incremental skip of verified files. Use "Copy to folder" or
+  "Copy to..." for those.
 - A path under the copied folder longer than 259 characters is left out,
   with a line in the log.
 - A WPD hang stops the paste until the worker restarts (120 s without

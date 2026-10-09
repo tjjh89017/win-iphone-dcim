@@ -34,7 +34,7 @@ const SIZE_WIDTH: f32 = 90.0;
 const DATE_WIDTH: f32 = 150.0;
 /// Windows fonts for names that the default fonts cannot draw (CJK).
 const FALLBACK_FONTS: [&str; 3] = ["msyh.ttc", "YuGothM.ttc", "malgun.ttf"];
-const EXPLORER_COPY: &str = "Copy (for Explorer paste)";
+const EXPLORER_COPY: &str = "Copy (paste in Explorer)";
 /// Pointer travel before a drag from a selected row starts `DoDragDrop`.
 const DRAG_DISTANCE: f32 = 6.0;
 /// Largest scroll step per frame while a rubber band is past an edge.
@@ -210,6 +210,8 @@ struct App {
     log: Vec<String>,
     copying: bool,
     copy: CopyTracker,
+    /// The destination of the running copy, for the status line.
+    copy_dest: PathBuf,
     /// The result line of the last cache download.
     download_final: Option<String>,
     download: Option<Download>,
@@ -258,6 +260,7 @@ impl App {
             log: Vec::new(),
             copying: false,
             copy: CopyTracker::new(Instant::now()),
+            copy_dest: PathBuf::new(),
             download_final: None,
             download: None,
             paste: None,
@@ -385,9 +388,13 @@ impl App {
                 }
             }
             Reply::CopyProgress(p) => {
+                if self.copy.scanning {
+                    self.status = format!("Copying to {}", self.copy_dest.display());
+                }
                 self.copy.update(p, Instant::now());
             }
             Reply::CopyScan { files, bytes } => {
+                self.copy.scan(files, bytes);
                 self.status = format!("Scanning... {files} files, {}", human_size(bytes));
             }
             Reply::CopyNote(note, text) => {
@@ -398,6 +405,7 @@ impl App {
             }
             Reply::CopyDone(result) => {
                 self.copying = false;
+                self.copy.scanning = false;
                 match result {
                     Ok(s) => {
                         self.copy.finish(&s, Instant::now());
@@ -511,12 +519,28 @@ impl App {
         }
     }
 
-    /// Start a clipboard copy of `paths`. The data object goes on the
-    /// clipboard when the device thread has walked the folders.
-    fn explorer_copy(&mut self, paths: Vec<String>) {
-        if paths.is_empty() || self.paste.is_none() {
+    /// Start a clipboard copy of `paths`, or of the checked items when
+    /// `paths` is empty. The data object goes on the clipboard when the
+    /// device thread has walked the folders.
+    fn explorer_copy(&mut self, mut paths: Vec<String>) {
+        if paths.is_empty()
+            && let Some(tree) = &self.tree
+        {
+            paths = tree.selection().top_paths();
+        }
+        if paths.is_empty() {
+            tracing::info!("Explorer copy ignored: nothing selected or checked");
+            self.status = "Select or check items to copy".into();
             return;
         }
+        if self.paste.is_none() {
+            tracing::info!(
+                "Explorer copy ignored: {} path(s), worker missing",
+                paths.len()
+            );
+            return;
+        }
+        tracing::info!("Explorer copy: listing {} path(s)", paths.len());
         let slot = Arc::new(Pending::default());
         self.status = format!("Preparing {} item(s) for File Explorer...", paths.len());
         self.send(Request::Enumerate {
@@ -544,6 +568,11 @@ impl App {
         let obj = DataObject::create(slot, shared);
         match dataobject::set_clipboard(&obj) {
             Ok(()) => {
+                tracing::info!(
+                    "Explorer copy: {} item(s), {} file(s) on the clipboard",
+                    listing.len(),
+                    listing.files
+                );
                 self.status = format!("{} item(s) copied. Paste in File Explorer.", listing.len());
                 self.paste_total = listing
                     .entries
@@ -553,7 +582,10 @@ impl App {
                     .sum();
                 self.clipboard = Some(obj);
             }
-            Err(e) => self.error(format!("Cannot put the copy on the clipboard: {e}")),
+            Err(e) => {
+                tracing::warn!("OleSetClipboard failed: {e}");
+                self.error(format!("Cannot put the copy on the clipboard: {e}"));
+            }
         }
     }
 
@@ -712,17 +744,28 @@ impl App {
         let Some(d) = &self.device else {
             return;
         };
+        // With the totals from the tree, the device thread skips its scan.
+        let totals = self.tree.as_ref().and_then(|t| match &what {
+            CopySet::Checked(selection) => t.totals(&selection.top_paths()),
+            CopySet::Paths(paths) => t.totals(paths),
+        });
         d.cancel.store(false, Ordering::SeqCst);
         d.send(Request::Copy {
             what,
             dest: dest.clone(),
             force: self.force,
+            totals,
         });
         self.copying = true;
         self.copy.start(Instant::now());
-        self.status = "Scanning...".into();
-        self.status = format!("Copying to {}", dest.display());
+        if totals.is_some() {
+            self.status = format!("Copying to {}", dest.display());
+        } else {
+            self.copy.scan(0, 0);
+            self.status = "Scanning...".into();
+        }
         self.push_log(format!("[start] copy to {}", dest.display()));
+        self.copy_dest = dest;
     }
 
     fn copy_checked(&mut self) {
@@ -944,7 +987,11 @@ impl App {
                     && let Some(d) = &self.device
                 {
                     d.cancel.store(true, Ordering::SeqCst);
-                    self.status = "Cancel: the copy stops after the current file".into();
+                    self.status = if self.copy.scanning {
+                        "Cancel: the scan stops now".into()
+                    } else {
+                        "Cancel: the copy stops after the current file".into()
+                    };
                 }
             } else {
                 let ready = self.dest.is_some()
@@ -953,7 +1000,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|t| !t.selection().is_empty());
                 if ui
-                    .add_enabled(ready, Button::new("Copy"))
+                    .add_enabled(ready, Button::new("Copy to folder"))
                     .on_hover_text("Copy the checked items into the destination")
                     .clicked()
                 {
@@ -1209,7 +1256,8 @@ impl App {
             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                 || (i.modifiers.command && i.key_pressed(egui::Key::C))
         });
-        if copy_key && !targets.is_empty() {
+        // With no highlighted row, `explorer_copy` takes the checked items.
+        if copy_key && !ui.ctx().egui_wants_keyboard_input() {
             actions.push(Action::ExplorerCopy(targets.clone()));
         }
         if !ui.ctx().egui_wants_keyboard_input() {
@@ -1509,9 +1557,13 @@ impl App {
         let now = Instant::now();
         let (file_fraction, file_text) = self.copy.file_line(now);
         ui.add(ProgressBar::new(file_fraction).text(file_text));
-        ui.add(
-            ProgressBar::new(self.copy.fraction()).text(self.copy.overall_text(self.copying, now)),
-        );
+        match self.copy.scan_text() {
+            Some(text) => ui.add(ProgressBar::new(0.0).animate(true).text(text)),
+            None => ui.add(
+                ProgressBar::new(self.copy.fraction())
+                    .text(self.copy.overall_text(self.copying, now)),
+            ),
+        };
         ui.separator();
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
         egui::ScrollArea::vertical()

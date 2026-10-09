@@ -28,6 +28,10 @@ pub struct CopyTracker {
     pub last_file: Option<FileLine>,
     /// The result line of the last run. Stays until the next run starts.
     pub final_line: Option<String>,
+    /// The device thread walks the set for the totals. No file is copied yet.
+    pub scanning: bool,
+    /// Files and bytes that the scan found so far.
+    pub scanned: (u64, u64),
 }
 
 impl CopyTracker {
@@ -39,7 +43,27 @@ impl CopyTracker {
             progress: CopyProgress::default(),
             last_file: None,
             final_line: None,
+            scanning: false,
+            scanned: (0, 0),
         }
+    }
+
+    /// A scan reply of the device thread. The scan runs until the first
+    /// progress reply.
+    pub fn scan(&mut self, files: u64, bytes: u64) {
+        self.scanning = true;
+        self.scanned = (files, bytes);
+    }
+
+    /// The text of the overall bar during the scan.
+    pub fn scan_text(&self) -> Option<String> {
+        self.scanning.then(|| {
+            format!(
+                "Scanning {} files, {}",
+                self.scanned.0,
+                human_size(self.scanned.1)
+            )
+        })
     }
 
     /// A new run starts.
@@ -49,6 +73,7 @@ impl CopyTracker {
 
     /// A progress reply of the device thread.
     pub fn update(&mut self, p: CopyProgress, now: Instant) {
+        self.scanning = false;
         self.meter
             .add(p.bytes_transferred.saturating_sub(self.seen), now);
         let delta = p.bytes_transferred.saturating_sub(self.seen);
@@ -90,6 +115,7 @@ impl CopyTracker {
 
     /// The run ended. Keep the overall line.
     pub fn finish(&mut self, summary: &CopySummary, now: Instant) {
+        self.scanning = false;
         self.end_file();
         self.final_line = Some(format!(
             "{}: copied {}, skipped {}, exists {}, failed {}  {}  elapsed {}  avg {}",
@@ -249,5 +275,46 @@ mod tests {
         assert!(v.final_line.is_some());
         v.start(at(3000));
         assert!(v.final_line.is_none());
+    }
+
+    #[test]
+    fn scan_state_lasts_until_the_first_progress() {
+        let t0 = Instant::now();
+        let mut v = CopyTracker::new(t0);
+        assert!(!v.scanning);
+        assert_eq!(v.scan_text(), None);
+        v.scan(0, 0);
+        assert!(v.scanning);
+        assert_eq!(v.scan_text().unwrap(), "Scanning 0 files, 0 B");
+        v.scan(3, 2048);
+        assert_eq!(v.scanned, (3, 2048));
+        assert_eq!(v.scan_text().unwrap(), "Scanning 3 files, 2.0 KiB");
+        v.update(progress(0, 0, None, t0), t0);
+        assert!(!v.scanning);
+        assert_eq!(v.scan_text(), None);
+        // A new run starts without the scan state.
+        v.scan(1, 1);
+        v.start(t0);
+        assert_eq!((v.scanning, v.scanned), (false, (0, 0)));
+        // A run cancelled during the scan ends the scan state.
+        v.scan(1, 1);
+        v.finish(
+            &CopySummary {
+                cancelled: true,
+                ..CopySummary::default()
+            },
+            t0,
+        );
+        assert!(!v.scanning);
+    }
+
+    #[test]
+    fn fraction_stays_at_most_one_when_totals_are_too_small() {
+        let t0 = Instant::now();
+        let mut v = CopyTracker::new(t0);
+        let mut p = progress(3000, 3000, None, t0);
+        p.files_done = 3;
+        v.update(p, t0);
+        assert_eq!(v.fraction(), 1.0);
     }
 }

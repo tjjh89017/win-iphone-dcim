@@ -65,6 +65,9 @@ pub enum Request {
         what: CopySet,
         dest: PathBuf,
         force: bool,
+        /// Files and bytes of the set, if the UI knows them. `None` makes
+        /// the device thread walk the set first.
+        totals: Option<(u64, u64)>,
     },
     /// Download a file to the cache for opening.
     Download {
@@ -301,8 +304,13 @@ impl DeviceThread {
                 let result = self.list(&path).map_err(text);
                 self.out.send(Reply::Listed { path, result });
             }
-            Request::Copy { what, dest, force } => {
-                let result = self.copy(&what, &dest, force).map_err(text);
+            Request::Copy {
+                what,
+                dest,
+                force,
+                totals,
+            } => {
+                let result = self.copy(&what, &dest, force, totals).map_err(text);
                 self.out.send(Reply::CopyDone(result));
             }
             Request::Download { path } => match self.download(&path) {
@@ -454,7 +462,13 @@ impl DeviceThread {
         Ok(entries)
     }
 
-    fn copy(&self, what: &CopySet, dest: &Path, force: bool) -> Result<CopySummary> {
+    fn copy(
+        &self,
+        what: &CopySet,
+        dest: &Path,
+        force: bool,
+        totals: Option<(u64, u64)>,
+    ) -> Result<CopySummary> {
         let fs = self.fs()?;
         let (paths, selection) = match what {
             CopySet::Checked(selection) => match selection.copy_root() {
@@ -483,32 +497,44 @@ impl DeviceThread {
             ..CopyOptions::default()
         };
         let mut out = std::io::sink();
-        // Walk the set once for the totals, so the overall progress is exact.
-        let mut scan = ScanSink {
-            out: &self.out,
-            cancel: &self.cancel,
-            files: 0,
-            bytes: 0,
-            last: Instant::now(),
-        };
-        let plan = CopyOptions {
-            dry_run: true,
-            ..opts
-        };
-        let scanned = match selection {
-            Some(selection) => {
-                let view = SelectedFs::new(fs, selection);
-                engine::run(&view, &sources, dest, plan, &mut scan, &mut out)
+        let (files, bytes) = match totals {
+            Some(t) => t,
+            None => {
+                // Walk the set once for the totals, so the overall progress
+                // is exact.
+                self.out.send(Reply::CopyScan { files: 0, bytes: 0 });
+                let mut scan = ScanSink {
+                    out: &self.out,
+                    cancel: &self.cancel,
+                    files: 0,
+                    bytes: 0,
+                    last: Instant::now(),
+                };
+                let plan = CopyOptions {
+                    dry_run: true,
+                    ..opts
+                };
+                let scanned = match selection {
+                    Some(selection) => {
+                        let view = SelectedFs::new(fs, selection);
+                        engine::run(&view, &sources, dest, plan, &mut scan, &mut out)
+                    }
+                    None => engine::run(fs, &sources, dest, plan, &mut scan, &mut out),
+                }?;
+                if scanned.cancelled || self.cancel.load(Ordering::SeqCst) {
+                    return Ok(CopySummary {
+                        cancelled: true,
+                        ..CopySummary::default()
+                    });
+                }
+                self.out.send(Reply::CopyScan {
+                    files: scan.files,
+                    bytes: scan.bytes,
+                });
+                (scan.files, scan.bytes)
             }
-            None => engine::run(fs, &sources, dest, plan, &mut scan, &mut out),
-        }?;
-        if scanned.cancelled || self.cancel.load(Ordering::SeqCst) {
-            return Ok(CopySummary {
-                cancelled: true,
-                ..CopySummary::default()
-            });
-        }
-        let mut sink = ChannelSink::new(&self.out, &self.cancel, scan.files, scan.bytes);
+        };
+        let mut sink = ChannelSink::new(&self.out, &self.cancel, files, bytes);
         match selection {
             Some(selection) => {
                 let view = SelectedFs::new(fs, selection);
@@ -626,11 +652,14 @@ struct ChannelSink<'a> {
     out: &'a Out,
     cancel: &'a AtomicBool,
     progress: CopyProgress,
+    /// Files and bytes that the planner of this run found so far.
+    planned: (u64, u64),
     last: Instant,
 }
 
 impl<'a> ChannelSink<'a> {
-    /// The totals come from the pre-scan and stay fixed.
+    /// The totals come from the pre-scan or the UI tree. They grow if the
+    /// planner finds more.
     fn new(out: &'a Out, cancel: &'a AtomicBool, files: u64, bytes: u64) -> Self {
         Self {
             out,
@@ -640,6 +669,7 @@ impl<'a> ChannelSink<'a> {
                 bytes_found: bytes,
                 ..CopyProgress::default()
             },
+            planned: (0, 0),
             last: Instant::now(),
         }
     }
@@ -655,6 +685,14 @@ impl<'a> ChannelSink<'a> {
 impl ProgressSink for ChannelSink<'_> {
     fn begin(&mut self) {
         self.push(true);
+    }
+
+    fn found(&mut self, size: Option<u64>) {
+        self.planned.0 += 1;
+        self.planned.1 += size.unwrap_or(0);
+        let p = &mut self.progress;
+        p.files_found = p.files_found.max(self.planned.0);
+        p.bytes_found = p.bytes_found.max(self.planned.1);
     }
 
     fn settled(&mut self, size: Option<u64>) {
@@ -803,6 +841,7 @@ mod tests {
             what: CopySet::Checked(tree.selection()),
             dest: dest.path().to_path_buf(),
             force: false,
+            totals: None,
         });
         let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
         let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
@@ -846,6 +885,7 @@ mod tests {
             what: CopySet::Checked(tree.selection()),
             dest: dest.path().to_path_buf(),
             force: false,
+            totals: None,
         });
         let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
         let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
@@ -872,6 +912,7 @@ mod tests {
             ]),
             dest: dest.path().to_path_buf(),
             force: false,
+            totals: None,
         });
         let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
         let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
@@ -883,6 +924,80 @@ mod tests {
             std::fs::read(dest.path().join("IMG_0001.HEIC")).unwrap(),
             b"heic-b"
         );
+    }
+
+    fn copy_paths(h: &DeviceHandle, dest: &Path, totals: Option<(u64, u64)>) -> Vec<Reply> {
+        h.send(Request::Copy {
+            what: CopySet::Paths(vec![
+                "/Internal Storage/DCIM/202601_a".into(),
+                "/Internal Storage/DCIM/202601_b/IMG_0001.HEIC".into(),
+            ]),
+            dest: dest.to_path_buf(),
+            force: false,
+            totals,
+        });
+        let replies = until(h, |r| matches!(r, Reply::CopyDone(_)));
+        let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {
+            panic!("copy failed");
+        };
+        assert_eq!((summary.copied, summary.failed), (3, 0));
+        replies
+    }
+
+    fn progresses(replies: &[Reply]) -> Vec<CopyProgress> {
+        replies
+            .iter()
+            .filter_map(|r| match r {
+                Reply::CopyProgress(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn copy_without_totals_reports_the_scan_start_and_end() {
+        let cache = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        open(&h);
+        let replies = copy_paths(&h, dest.path(), None);
+        let scans: Vec<(u64, u64)> = replies
+            .iter()
+            .filter_map(|r| match r {
+                Reply::CopyScan { files, bytes } => Some((*files, *bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scans.first(), Some(&(0, 0)));
+        assert_eq!(scans.last(), Some(&(3, 2060)));
+        // All scan replies come before the first progress reply.
+        let last_scan = replies
+            .iter()
+            .rposition(|r| matches!(r, Reply::CopyScan { .. }))
+            .unwrap();
+        let first_progress = replies
+            .iter()
+            .position(|r| matches!(r, Reply::CopyProgress(_)))
+            .unwrap();
+        assert!(last_scan < first_progress);
+        let p = progresses(&replies);
+        assert_eq!((p[0].files_found, p[0].bytes_found), (3, 2060));
+    }
+
+    #[test]
+    fn copy_with_totals_skips_the_scan_and_lets_totals_grow() {
+        let cache = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let h = handle(cache.path());
+        open(&h);
+        // The totals are too small, like a tree that is out of date.
+        let replies = copy_paths(&h, dest.path(), Some((2, 100)));
+        assert!(!replies.iter().any(|r| matches!(r, Reply::CopyScan { .. })));
+        let p = progresses(&replies);
+        assert_eq!((p[0].files_found, p[0].bytes_found), (2, 100));
+        let last = p.last().unwrap();
+        assert_eq!((last.files_found, last.bytes_found), (3, 2060));
+        assert_eq!((last.files_done, last.bytes_done), (3, 2060));
     }
 
     #[test]
@@ -898,6 +1013,7 @@ mod tests {
             what: CopySet::Checked(tree.selection()),
             dest: dest.path().to_path_buf(),
             force: false,
+            totals: None,
         });
         let replies = until(&h, |r| matches!(r, Reply::CopyDone(_)));
         let Some(Reply::CopyDone(Ok(summary))) = replies.last() else {

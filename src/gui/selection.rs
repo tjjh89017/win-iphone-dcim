@@ -121,6 +121,24 @@ impl Tree {
         out
     }
 
+    /// The file count and bytes at and below `paths`, like the planner of a
+    /// copy counts them. A file without a size counts 0 bytes. `None` if a
+    /// path or a folder below it is not loaded.
+    pub fn totals(&self, paths: &[String]) -> Option<(u64, u64)> {
+        let (mut files, mut bytes) = (0, 0);
+        let mut stack: Vec<&str> = paths.iter().map(String::as_str).collect();
+        while let Some(p) = stack.pop() {
+            let item = self.items.get(p)?;
+            if item.entry.is_folder {
+                stack.extend(item.children.as_ref()?.iter().map(String::as_str));
+            } else {
+                files += 1;
+                bytes += item.entry.size.unwrap_or(0);
+            }
+        }
+        Some((files, bytes))
+    }
+
     /// Set the listing of a folder. A new child takes the mark of the
     /// folder. A child that was loaded before keeps its mark and subtree.
     pub fn set_children(&mut self, path: &str, children: Vec<Entry>) {
@@ -285,6 +303,25 @@ impl Selection {
 
     pub fn mark(&self, path: &str) -> Option<Mark> {
         self.marks.get(path).copied()
+    }
+
+    /// The fully checked objects that no fully checked folder holds, in
+    /// tree order. A folder in the list stands for its whole subtree.
+    pub fn top_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![self.root.clone()];
+        while let Some(path) = stack.pop() {
+            match self.mark(&path) {
+                Some(Mark::All) => out.push(path),
+                Some(Mark::Some) => {
+                    if let Some(kids) = self.kids.get(&path) {
+                        stack.extend(kids.iter().rev().cloned());
+                    }
+                }
+                None => {}
+            }
+        }
+        out
     }
 
     /// The deepest object that holds every checked object: a fully checked
@@ -623,6 +660,50 @@ mod tests {
             tree.set_children(&path, entries);
         }
         tree
+    }
+
+    #[test]
+    fn top_paths_lists_the_highest_fully_checked_objects() {
+        let mut tree = loaded(&dcim());
+        assert!(tree.selection().top_paths().is_empty());
+        tree.set_checked(A1, true);
+        tree.set_checked(B1, true);
+        let mut top = tree.selection().top_paths();
+        top.sort();
+        // B1 is the only file of B, so B is fully checked.
+        assert_eq!(top, [A1, B]);
+        tree.set_checked(DCIM, true);
+        assert_eq!(tree.selection().top_paths(), ["/"]);
+    }
+
+    #[test]
+    fn totals_add_up_loaded_files_and_folders() {
+        let tree = loaded(&dcim());
+        assert_eq!(tree.totals(&[A2.into()]), Some((1, 2048)));
+        assert_eq!(tree.totals(&[A.into(), B1.into()]), Some((3, 2060)));
+        assert_eq!(tree.totals(&["/".into()]), Some((3, 2060)));
+        assert_eq!(tree.totals(&[]), Some((0, 0)));
+    }
+
+    #[test]
+    fn totals_are_unknown_with_an_unloaded_folder() {
+        let mut tree = loaded(&dcim());
+        // Add a folder to DCIM that is not listed yet.
+        let mut b = tree.entry(B).unwrap().clone();
+        b.name = "202601_c".into();
+        b.path = format!("{DCIM}/202601_c");
+        let mut kids: Vec<Entry> = tree
+            .children(DCIM)
+            .unwrap()
+            .iter()
+            .map(|p| tree.entry(p).unwrap().clone())
+            .collect();
+        kids.push(b.clone());
+        tree.set_children(DCIM, kids);
+        assert_eq!(tree.totals(&[A.into()]), Some((2, 2054)));
+        assert_eq!(tree.totals(&[A.into(), b.path.clone()]), None);
+        assert_eq!(tree.totals(&[DCIM.into()]), None);
+        assert_eq!(tree.totals(&["/missing".into()]), None);
     }
 
     #[test]

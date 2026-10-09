@@ -73,6 +73,29 @@ fn formats() -> Formats {
     })
 }
 
+/// The name of a clipboard format for the logs.
+fn format_name(cf: u16) -> String {
+    let f = formats();
+    match cf {
+        _ if cf == f.descriptor => "FileGroupDescriptorW".into(),
+        _ if cf == f.contents => "FileContents".into(),
+        _ if cf == f.preferred => "Preferred DropEffect".into(),
+        _ if cf == f.performed => "Performed DropEffect".into(),
+        _ => format!("cf {cf}"),
+    }
+}
+
+fn log_request(call: &str, fmt: &FORMATETC, result: HRESULT) {
+    tracing::debug!(
+        "paste: {call} {} aspect={} lindex={} tymed={:#x} -> {:#010x}",
+        format_name(fmt.cfFormat),
+        fmt.dwAspect,
+        fmt.lindex,
+        fmt.tymed,
+        result.0
+    );
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -215,10 +238,8 @@ fn format(cf: u16, tymed: i32) -> FORMATETC {
     }
 }
 
-impl IDataObject_Impl for DataObject_Impl {
-    fn GetData(&self, pformatetcin: *const FORMATETC) -> Result<STGMEDIUM> {
-        // SAFETY: COM passes a valid pointer or null.
-        let fmt = unsafe { pformatetcin.as_ref() }.ok_or(E_POINTER)?;
+impl DataObject {
+    fn get_data(&self, fmt: &FORMATETC) -> Result<STGMEDIUM> {
         let tymed = offered(fmt.cfFormat).ok_or(DV_E_FORMATETC)?;
         check(fmt, tymed).ok()?;
         let f = formats();
@@ -239,6 +260,20 @@ impl IDataObject_Impl for DataObject_Impl {
             pUnkForRelease: std::mem::ManuallyDrop::new(None),
         })
     }
+}
+
+impl IDataObject_Impl for DataObject_Impl {
+    fn GetData(&self, pformatetcin: *const FORMATETC) -> Result<STGMEDIUM> {
+        // SAFETY: COM passes a valid pointer or null.
+        let fmt = unsafe { pformatetcin.as_ref() }.ok_or(E_POINTER)?;
+        let result = self.get_data(fmt);
+        let code = match &result {
+            Ok(_) => S_OK,
+            Err(e) => e.code(),
+        };
+        log_request("GetData", fmt, code);
+        result
+    }
 
     fn GetDataHere(&self, _pformatetc: *const FORMATETC, _pmedium: *mut STGMEDIUM) -> Result<()> {
         Err(E_NOTIMPL.into())
@@ -249,10 +284,12 @@ impl IDataObject_Impl for DataObject_Impl {
         let Some(fmt) = (unsafe { pformatetc.as_ref() }) else {
             return E_POINTER;
         };
-        match offered(fmt.cfFormat) {
+        let result = match offered(fmt.cfFormat) {
             Some(tymed) => check(fmt, tymed),
             None => DV_E_FORMATETC,
-        }
+        };
+        log_request("QueryGetData", fmt, result);
+        result
     }
 
     fn GetCanonicalFormatEtc(
@@ -291,6 +328,7 @@ impl IDataObject_Impl for DataObject_Impl {
     }
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> Result<IEnumFORMATETC> {
+        tracing::debug!("paste: EnumFormatEtc direction={dwdirection}");
         if dwdirection != DATADIR_GET.0 as u32 {
             return Err(E_NOTIMPL.into());
         }
@@ -633,20 +671,31 @@ fn mta_stream(core: Arc<StreamCore>) -> Result<IStream> {
     proxy
 }
 
-/// Put `obj` on the clipboard.
-pub fn set_clipboard(obj: &IDataObject) -> Result<()> {
-    // SAFETY: called on the UI thread, which is an OLE STA.
-    unsafe { OleSetClipboard(obj) }
-}
-
-/// Take `obj` off the clipboard if it is still there.
-pub fn clear_clipboard(obj: &IDataObject) {
+/// `S_OK` if `obj` is on the clipboard now.
+fn is_current_clipboard(obj: &IDataObject) -> HRESULT {
     #[link(name = "ole32")]
     unsafe extern "system" {
         fn OleIsCurrentClipboard(pdataobj: *mut c_void) -> HRESULT;
     }
     // SAFETY: `obj` is a valid interface; OleIsCurrentClipboard only reads it.
-    let current = unsafe { OleIsCurrentClipboard(obj.as_raw()) };
+    unsafe { OleIsCurrentClipboard(obj.as_raw()) }
+}
+
+/// Put `obj` on the clipboard.
+pub fn set_clipboard(obj: &IDataObject) -> Result<()> {
+    // SAFETY: called on the UI thread, which is an OLE STA.
+    unsafe { OleSetClipboard(obj) }?;
+    let current = is_current_clipboard(obj);
+    tracing::info!(
+        "clipboard set; OleIsCurrentClipboard -> {:#010x}",
+        current.0
+    );
+    Ok(())
+}
+
+/// Take `obj` off the clipboard if it is still there.
+pub fn clear_clipboard(obj: &IDataObject) {
+    let current = is_current_clipboard(obj);
     if current == S_OK {
         // SAFETY: called on the UI thread, which is an OLE STA.
         if let Err(e) = unsafe { OleSetClipboard(None) } {

@@ -29,6 +29,7 @@ use std::process::ExitCode;
 pub fn main() -> ExitCode {
     #[cfg(windows)]
     {
+        init_logging();
         app::run()
     }
     #[cfg(not(windows))]
@@ -36,4 +37,18 @@ pub fn main() -> ExitCode {
         eprintln!("win-iphone-dcim-gui runs on Windows only");
         ExitCode::from(crate::error::exit::INTERNAL as u8)
     }
+}
+
+/// Send logs to stderr. The GUI has no console, so redirect it to see
+/// them: `set RUST_LOG=win_iphone_dcim=debug` and
+/// `win-iphone-dcim-gui.exe 2> gui.log`.
+#[cfg(windows)]
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
