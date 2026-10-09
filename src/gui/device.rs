@@ -180,7 +180,10 @@ pub enum Reply {
         number: usize,
         files: usize,
         path: String,
+        /// Bytes of this file read so far.
         bytes: u64,
+        /// The size of this file, if the device reports it.
+        size: Option<u64>,
     },
     /// A paste stream ended: the bytes read, or the error.
     PasteFileDone {
@@ -421,6 +424,7 @@ impl DeviceThread {
         if node.is_folder {
             return Err(Error::NotAFolder(path.to_owned()));
         }
+        let size = node.size;
         let mut bytes = 0;
         let mut last = Instant::now();
         let out = &self.out;
@@ -433,6 +437,7 @@ impl DeviceThread {
                     files,
                     path: path.to_owned(),
                     bytes,
+                    size,
                 });
             }
         });

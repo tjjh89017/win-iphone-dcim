@@ -37,8 +37,12 @@ pub struct ChunkWriter<F: FnMut(u64)> {
     on_bytes: F,
 }
 
+/// The error text when the reader stops early, for example when File
+/// Explorer cancels a paste.
+pub const CLOSED: &str = "the reader closed the stream";
+
 fn closed() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "the reader closed the stream")
+    io::Error::new(io::ErrorKind::BrokenPipe, CLOSED)
 }
 
 impl<F: FnMut(u64)> ChunkWriter<F> {

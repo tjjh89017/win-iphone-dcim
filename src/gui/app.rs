@@ -8,14 +8,16 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align, Button, Checkbox, Label, Layout, ProgressBar, RichText, Sense};
+use eframe::egui::{
+    self, Align, Button, Checkbox, Color32, Label, Layout, ProgressBar, RichText, Sense,
+};
 use egui_extras::{Column, TableBuilder};
 
 use windows::Win32::System::Com::IDataObject;
 
 use super::cache;
 use super::chunks::Pending;
-use super::copyview::CopyTracker;
+use super::copyview::{CopyTracker, EndState, PasteFile, PasteTracker};
 use super::dataobject::{self, DataObject, PasteShared};
 use super::device::{CopySet, DeviceHandle, ListingResult, Reply, Request, WorkerConnector};
 use super::dnd;
@@ -223,12 +225,7 @@ struct App {
     /// The data object that this app put on the clipboard.
     clipboard: Option<IDataObject>,
     /// What Explorer reads now.
-    paste_status: Option<String>,
-    /// The paste stream that reads now: file number, files, bytes.
-    paste_live: Option<(usize, usize, u64)>,
-    /// Bytes of the files on the clipboard, 0 if unknown.
-    paste_total: u64,
-    paste_meter: SpeedMeter,
+    paste_view: PasteTracker,
     download_meter: SpeedMeter,
     /// The user asked to close while Explorer reads.
     close_warning: bool,
@@ -267,10 +264,7 @@ impl App {
             paste: None,
             clip_wait: None,
             clipboard: None,
-            paste_status: None,
-            paste_live: None,
-            paste_total: 0,
-            paste_meter: SpeedMeter::new(Instant::now()),
+            paste_view: PasteTracker::new(Instant::now()),
             download_meter: SpeedMeter::new(Instant::now()),
             close_warning: false,
             close_anyway: false,
@@ -339,6 +333,7 @@ impl App {
                     .or(if list.len() == 1 { Some(0) } else { None });
                 if self.devices != list {
                     self.clear_own_clipboard("the device list changed");
+                    self.clear_bars();
                 }
                 self.devices = list;
                 match keep {
@@ -419,7 +414,10 @@ impl App {
                             human_size(s.bytes)
                         );
                     }
-                    Err(e) => self.error(format!("Copy failed: {e}")),
+                    Err(e) => {
+                        self.copy.fail(&e);
+                        self.error(format!("Copy failed: {e}"));
+                    }
                 }
             }
             Reply::DownloadProgress { path, bytes, size } => {
@@ -481,45 +479,34 @@ impl App {
             Reply::PasteProgress {
                 number,
                 files,
+                path,
                 bytes,
-                ..
-            } => {
-                let now = Instant::now();
-                let delta = match self.paste_live {
-                    Some((n, _, b)) if n == number && bytes >= b => bytes - b,
-                    Some((n, ..)) if n != number && number != 1 => bytes,
-                    Some(_) => {
-                        // A new paste run starts at file 1 or re-reads a file.
-                        if number == 1 {
-                            self.paste_meter.reset(now);
-                        }
-                        bytes
-                    }
-                    None => {
-                        self.paste_meter.reset(now);
-                        bytes
-                    }
-                };
-                self.paste_meter.add(delta, now);
-                self.paste_live = Some((number, files, bytes));
-            }
+                size,
+            } => self.paste_view.progress(
+                PasteFile {
+                    number,
+                    files,
+                    path,
+                    bytes,
+                    size,
+                },
+                Instant::now(),
+            ),
             Reply::PasteFileDone {
                 number,
                 files,
                 path,
                 result,
             } => match result {
-                Ok(_) => {
-                    self.paste_live = None;
-                    self.paste_status = (number < files)
-                        .then(|| format!("Explorer is reading {number} of {files}..."));
+                Ok(bytes) => {
+                    self.paste_view
+                        .file_done(number, files, path, bytes, Instant::now());
                     if number == files {
                         self.status = format!("Explorer read {files} file(s)");
                     }
                 }
                 Err(e) => {
-                    self.paste_live = None;
-                    self.paste_status = None;
+                    self.paste_view.file_failed(number, files, path.clone(), &e);
                     self.error(format!("Explorer paste of {path} failed: {e}"));
                 }
             },
@@ -596,7 +583,8 @@ impl App {
                     listing.files
                 );
                 self.status = format!("{} item(s) copied. Paste in File Explorer.", listing.len());
-                self.paste_total = listing
+                self.paste_view.clear();
+                self.paste_view.total = listing
                     .entries
                     .iter()
                     .flatten()
@@ -634,23 +622,6 @@ impl App {
         }
     }
 
-    /// The status of the running Explorer paste, with speed and bytes left.
-    fn paste_text(&self) -> Option<String> {
-        let Some((number, files, _)) = self.paste_live else {
-            return self.paste_status.clone();
-        };
-        let now = Instant::now();
-        let mut text = format!(
-            "Explorer is reading {number} of {files} \u{b7} {}",
-            format_speed(self.paste_meter.current(now))
-        );
-        if self.paste_total > 0 {
-            let left = self.paste_total.saturating_sub(self.paste_meter.total());
-            text.push_str(&format!(" \u{b7} {} left", human_size(left)));
-        }
-        Some(text)
-    }
-
     /// `12.3 MiB/s` for a running cache download.
     fn download_text(&self, d: &Download) -> String {
         let now = Instant::now();
@@ -677,11 +648,22 @@ impl App {
     }
 
     fn open_device(&mut self, index: usize) {
+        if self.current != Some(index) {
+            self.clear_bars();
+        }
         self.current = Some(index);
         self.tree = None;
         self.cache_dir = None;
         self.status = "Opening the device...".into();
         self.send(Request::Open { index });
+    }
+
+    /// Remove the progress bars of the last copy and paste.
+    fn clear_bars(&mut self) {
+        if !self.copying {
+            self.copy = CopyTracker::new(Instant::now());
+        }
+        self.paste_view.clear();
     }
 
     fn load(&mut self, path: &str) {
@@ -780,6 +762,9 @@ impl App {
         });
         self.copying = true;
         self.copy.start(Instant::now());
+        if !self.paste_view.running() {
+            self.paste_view.clear();
+        }
         if totals.is_some() {
             self.status = format!("Copying to {}", dest.display());
         } else {
@@ -1041,9 +1026,10 @@ impl App {
                 ui.separator();
                 ui.label(self.download_text(d));
             }
-            if let Some(p) = self.paste_text() {
+            if self.paste_view.running() {
+                // The bottom bars show the detail.
                 ui.separator();
-                ui.label(p);
+                ui.label("Explorer is reading...");
             }
         });
         if self.close_warning {
@@ -1579,15 +1565,35 @@ impl App {
             )));
         }
         let now = Instant::now();
-        let (file_fraction, file_text) = self.copy.file_line(now);
-        ui.add(ProgressBar::new(file_fraction).text(file_text));
-        match self.copy.scan_text() {
-            Some(text) => ui.add(ProgressBar::new(0.0).animate(true).text(text)),
-            None => ui.add(
-                ProgressBar::new(self.copy.fraction())
-                    .text(self.copy.overall_text(self.copying, now)),
-            ),
+        let pasting = if let Some((fraction, text)) = self.paste_view.file_line() {
+            let bar = match fraction {
+                Some(f) => ProgressBar::new(f),
+                None => ProgressBar::new(0.0).animate(true),
+            };
+            ui.add(bar.text(text));
+            if let Some(text) = self.paste_view.overall_text(now) {
+                let bar = ProgressBar::new(self.paste_view.fraction()).text(text);
+                ui.add(end_fill(bar, self.paste_view.end(), ui.visuals().dark_mode));
+            }
+            true
+        } else {
+            false
         };
+        // A copy that runs during a paste stacks its bars below.
+        if !pasting || self.copying {
+            let (file_fraction, file_text) = self.copy.file_line(now);
+            ui.add(ProgressBar::new(file_fraction).text(file_text));
+            match self.copy.scan_text() {
+                Some(text) => ui.add(ProgressBar::new(0.0).animate(true).text(text)),
+                None => {
+                    let bar = ProgressBar::new(self.copy.fraction())
+                        .text(self.copy.overall_text(self.copying, now));
+                    // A running copy keeps the normal fill.
+                    let end = self.copy.end.filter(|_| !self.copying);
+                    ui.add(end_fill(bar, end, ui.visuals().dark_mode))
+                }
+            };
+        }
         ui.separator();
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
         egui::ScrollArea::vertical()
@@ -1664,6 +1670,19 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// Fill an overall bar green when the run is done and red when it was
+/// cancelled or failed. Light visuals use lighter colors for the dark text.
+fn end_fill(bar: ProgressBar, end: Option<EndState>, dark: bool) -> ProgressBar {
+    let color = match (end, dark) {
+        (None, _) => return bar,
+        (Some(EndState::Done), true) => Color32::from_rgb(0x3c, 0x9a, 0x5f),
+        (Some(EndState::Done), false) => Color32::from_rgb(0x8f, 0xd1, 0x9e),
+        (Some(_), true) => Color32::from_rgb(0xc0, 0x4a, 0x4a),
+        (Some(_), false) => Color32::from_rgb(0xf0, 0x9a, 0x9a),
+    };
+    bar.fill(color)
 }
 
 /// Paint the rubber band over the list. Returns the scroll step when the

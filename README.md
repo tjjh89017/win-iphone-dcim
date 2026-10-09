@@ -257,8 +257,11 @@ The window:
   "Scanning... N files, X"; Cancel stops it), so the overall bar is a true
   percent of the bytes, with files and bytes done/total, current and average
   speed, elapsed time and ETA. The final overall line stays until the next
-  run. A double-click download and an Explorer paste show their speed and ETA
-  in the same way.
+  run: green when the run is done, red when it was cancelled or failed. The
+  bars clear when the device changes. A double-click download shows its speed
+  and ETA in the same way. An Explorer paste shows its own two bars in the
+  same place: the file that Explorer reads, and the overall files, speed,
+  bytes left and ETA.
 
 The cache of downloaded files is deleted when the GUI closes and when it
 starts (files that a viewer still holds are left). Untick "Clear cache on
@@ -316,8 +319,11 @@ Explorer window or the desktop. Only copy is offered; Explorer never moves
 or deletes files on the iPhone.
 
 File Explorer shows its own progress dialog and its own "Replace or Skip
-Files" dialog. The GUI adds no dialog. The status text shows "Explorer is
-reading N of M" while Explorer reads.
+Files" dialog. The GUI adds no dialog. While Explorer reads, the status text
+shows "Explorer is reading..." and the bottom progress bars show the file in
+transfer and "Explorer is reading N of M" with the speed, the bytes left and
+the ETA. At the end the overall bar turns green ("Done: N files, SIZE in
+TIME"), or red when Explorer cancels or a read fails.
 
 Limits of this mode:
 
