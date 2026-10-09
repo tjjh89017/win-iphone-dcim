@@ -11,7 +11,7 @@ images, videos or metadata. It never writes to or deletes from the iPhone.
 
 Phase 1, 2 and 3 complete. Phase 4 (GUI) in progress: browsing, double-click
 open, in-app copy, and Explorer paste and drag-and-drop work. See [docs/SPEC.md](docs/SPEC.md) for the
-full plan. Release v0.1.0 is published.
+full plan. Release v0.2.0 is published.
 
 Works now:
 
@@ -47,7 +47,7 @@ the next real-device run.
 
 ## Download
 
-Open the [Releases page](https://github.com/tjjh89017/win-iphone-dcim/releases/tag/v0.1.0)
+Open the [Releases page](https://github.com/tjjh89017/win-iphone-dcim/releases/tag/v0.2.0)
 and download the zip for your CPU, with `SHA256SUMS.txt` to check it:
 
 - `win-iphone-dcim-windows-x64.zip`
