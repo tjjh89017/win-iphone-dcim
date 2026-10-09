@@ -97,3 +97,20 @@ jobs:
           path: ${{ steps.build.outputs.exe }}
           retention-days: 7
           if-no-files-found: error
+
+  # One stable check the ruleset can require in place of every Build (<artifact>) cell.
+  build-required:
+    name: Build
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm every build target succeeded
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_RESULT" != "success" ]]; then
+            echo "build job result: ${BUILD_RESULT}" >&2
+            exit 1
+          fi
